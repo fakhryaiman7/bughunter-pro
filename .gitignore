@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+.env
+.venv
+
+# Output directories (don't commit scan results)
+outputs/
+results/
+logs/
+
+# Wordlists (too large for git)
+wordlists/
+
+# Screenshots
+screenshots/
+
+# Knowledge base (personal scan data)
+knowledge/
+
+# API Keys & Secrets — NEVER commit these
+*.key
+*.pem
+*.p12
+config.local.py
+secrets.yaml
+.shodan_key
+
+# Tools binaries
+*.exe
+*.bin
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Nuclei output
+nuclei_output.json
+*_nuclei.json
+
+# Logs
+*.log
+cron_*.log
+monitor_*.log

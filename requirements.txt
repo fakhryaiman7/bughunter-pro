@@ -1,0 +1,8 @@
+# BugHunter Pro v2.0 — Python Dependencies
+# Install: pip install -r requirements.txt
+
+requests>=2.31.0
+urllib3>=2.0.0
+colorama>=0.4.6        # Windows color support
+python-dotenv>=1.0.0   # .env config loading
+dnspython>=2.4.0       # DNS resolution helpers
