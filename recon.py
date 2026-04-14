@@ -48,6 +48,8 @@ class ReconEngine:
                 (self._subfinder, "Subfinder"),
                 (self._amass, "Amass"),
                 (self._crtsh, "Crt.sh"),
+                (self._alienvault_subdomains, "Alienvault"),
+                (self._anubis_subdomains, "Anubis"),
                 (self._assetfinder, "Assetfinder"),
                 (self._wayback_subdomains, "Wayback Machine"),
                 (self._cert_sans, "Cert SANs"),
@@ -189,27 +191,65 @@ class ReconEngine:
         return [l.strip() for l in out.splitlines() if l.strip()]
 
     @retry(max_attempts=3, backoff=3)
-    def _crtsh(self, domain: str) -> List[str]:
-        r = requests.get(f"https://crt.sh/?q=%.{domain}&output=json", timeout=15)
+    def _crtsh(self, domain: str, context: Optional[PipelineContext] = None) -> List[str]:
+        session = context.session if context else requests
+        url = f"https://crt.sh/?q=%.{domain}&output=json"
+        r = session.get(url, timeout=15)
         if r.status_code != 200: raise Exception(f"crt.sh error: {r.status_code}")
-        return [e.get("name_value", "").strip().lstrip("*.") for e in r.json()]
-
-    @retry(max_attempts=3, backoff=5)
-    def _wayback_subdomains(self, domain: str) -> List[str]:
-        url = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey&limit=500"
-        r = requests.get(url, timeout=20)
-        if r.status_code != 200: raise Exception(f"Wayback error: {r.status_code}")
+        
         subs = set()
-        for line in r.text.splitlines():
-            match = re.match(r"https?://([^/]+)", line)
-            if match:
-                sub = match.group(1).split(":")[0]
-                if sub.endswith(domain): subs.add(sub)
+        for e in r.json():
+            name_value = e.get("name_value", "").lower()
+            # crt.sh often returns multiple domains separated by \n
+            for sub in name_value.split("\n"):
+                sub = sub.strip().lstrip("*.")
+                if sub.endswith(domain) and sub != domain:
+                    subs.add(sub)
         return list(subs)
 
-    def _shodan_subdomains(self, domain: str, key: str) -> List[str]:
+    @retry(max_attempts=3, backoff=5)
+    def _wayback_subdomains(self, domain: str, context: Optional[PipelineContext] = None) -> List[str]:
+        session = context.session if context else requests
+        url = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey&limit=500"
+        r = session.get(url, timeout=20)
+        if r.status_code != 200: raise Exception(f"Wayback error: {r.status_code}")
+        
+        subs = set()
+        # Robust regex for domain extraction
+        domain_regex = re.compile(r"(([a-z0-9]+\.)+" + re.escape(domain) + r")", re.I)
+        for line in r.text.splitlines():
+            matches = domain_regex.findall(line)
+            for match in matches:
+                # findall returns tuple if there are groups, but we only have one group
+                sub = match[0].lower() if isinstance(match, tuple) else match.lower()
+                if sub.endswith(domain) and sub != domain:
+                    subs.add(sub)
+        return list(subs)
+
+    def _alienvault_subdomains(self, domain: str, context: PipelineContext) -> List[str]:
         try:
-            r = requests.get(f"https://api.shodan.io/dns/domain/{domain}?key={key}", timeout=10)
+            url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
+            r = context.session.get(url, timeout=10)
+            if r.status_code == 200:
+                subs = {e.get("hostname", "").lower() for e in r.json().get("passive_dns", [])}
+                return [s for s in subs if s.endswith(domain) and s != domain]
+        except: pass
+        return []
+
+    def _anubis_subdomains(self, domain: str, context: PipelineContext) -> List[str]:
+        try:
+            url = f"https://jldc.me/anubis/subdomains/{domain}"
+            r = context.session.get(url, timeout=10)
+            if r.status_code == 200:
+                subs = {s.lower() for s in r.json()}
+                return [s for s in subs if s.endswith(domain) and s != domain]
+        except: pass
+        return []
+
+    def _shodan_subdomains(self, domain: str, key: str, context: Optional[PipelineContext] = None) -> List[str]:
+        session = context.session if context else requests
+        try:
+            r = session.get(f"https://api.shodan.io/dns/domain/{domain}?key={key}", timeout=10)
             if r.status_code == 200:
                 return [f"{s}.{domain}" for s in r.json().get("subdomains", [])]
         except: pass
