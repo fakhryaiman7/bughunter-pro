@@ -66,7 +66,7 @@ info() { echo -e "  ${INFO} $1"; }
 # ── Helper: check tool ──────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
-# ── Helper: install Go tool ─────────────────────────────────
+# ── Helper: install Go tool ─────────────────────────────────────────────────────────
 install_go_tool() {
     local name=$1
     local pkg=$2
@@ -74,19 +74,13 @@ install_go_tool() {
     if has "$name"; then
         ok "$desc already installed"
     else
-        echo -e "  ${INFO} Installing ${BOLD}${desc}${RESET} (Go tool)..."
-        # Show go output filtered to meaningful lines
-        go install -v "$pkg" 2>&1 | \
-            grep --line-buffered -E '(downloading|go: downloading|Downloading|fetching)' | \
-            while IFS= read -r line; do
-                mod=$(echo "$line" | awk '{print $3}' 2>/dev/null || echo "$line")
-                ver=$(echo "$line" | awk '{print $4}' 2>/dev/null || echo "")
-                echo -e "    ${CYAN}↓${RESET} $mod ${YELLOW}$ver${RESET}"
-            done
+        echo -e "  ${INFO} Installing ${BOLD}${desc}${RESET} — this may take a few minutes..."
+        # Run directly — no pipe to avoid hanging
+        go install "$pkg"
         if has "$name"; then
-            echo -e "  ${GREEN}[✓] $desc installed${RESET}"
+            ok "$desc installed"
         else
-            echo -e "  ${RED}[✗] $desc failed (non-critical)${RESET}"
+            warn "$desc failed (non-critical — some features will be skipped)"
         fi
     fi
 }
