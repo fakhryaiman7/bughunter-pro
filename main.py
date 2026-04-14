@@ -148,6 +148,21 @@ class BugHunterPro:
             report_path = self.reporter.generate(exploit_results, ranked, [])
             self.notifier.send_summary(ranked, exploit_results)
             pb.complete(f"All updates pushed. Report: {report_path}")
+            
+            # ── 14. High-Impact Summary ──────────
+            print("\n" + "═"*60)
+            log("   CRITICAL INTELLIGENCE SUMMARY", Colors.CYAN)
+            print("═"*60)
+            if exploit_results:
+                log(f"[!] Actionable Vulnerabilities: {len(exploit_results)}", Colors.YELLOW)
+                for res in exploit_results[:5]:
+                    log(f"    ↳ {res.get('severity', 'INFO')}: {res.get('name')} -> {res.get('url')}", Colors.WHITE)
+            else:
+                log("[*] No immediate critical exploits found.", Colors.GREEN)
+            
+            log(f"\n[*] Total Assets Scanned: {len(ranked)}", Colors.WHITE)
+            log(f"[*] Workspace Directory: {self.output}", Colors.WHITE)
+            print("═"*60 + "\n")
 
         except KeyboardInterrupt:
             log("\n[!] Execution interrupted by user.", Colors.YELLOW)

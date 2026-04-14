@@ -290,11 +290,32 @@ class ReconEngine:
         try:
             r = context.session.get(url, timeout=context.config.timeout, verify=False)
             content = (str(r.headers) + r.text).lower()
-            sigs = {"Cloudflare": "cloudflare", "Nginx": "nginx", "Apache": "apache", "WordPress": "wp-content", "React": "react"}
+            
+            # Signature definitions
+            sigs = {
+                "Cloudflare": "cloudflare", "Nginx": "nginx", "Apache": "apache", 
+                "WordPress": "wp-content", "React": "react", "Django": "csrftoken",
+                "Express": "x-powered-by: express", "FastAPI": "fastapi",
+                "Laravel": "laravel_session", "ASP.NET": "x-aspnet-version",
+                "Jenkins": "x-jenkins", "Jira": "atlassian", "Swagger": "swagger-ui"
+            }
+            
+            # Check Body & Headers
             for name, sig in sigs.items():
-                if sig in content: techs.append(name)
+                if sig.lower() in content:
+                    techs.append(name)
+            
+            # Header specific checks
+            server = r.headers.get("Server", "").lower()
+            if "nginx" in server: techs.append("Nginx")
+            if "apache" in server: techs.append("Apache")
+            
+            powered = r.headers.get("X-Powered-By", "").lower()
+            if "express" in powered: techs.append("Express")
+            if "php" in powered: techs.append("PHP")
+
         except: pass
-        return techs
+        return list(set(techs))
 
     def run_port_scan(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """Smart port scanner (stubbed for v2.0)."""

@@ -97,19 +97,23 @@ class FilterPipeline:
             label = "LOW VALUE"
             
             if re.search(r'(api|admin|dev|staging|test|v1|v2|graphql|dashboard)', url, re.I):
-                score += 30
+                score += 35
+            
+            if "admin" in url.lower():
+                score += 15 # Stacked bonus for admin keywords
                 
             status = status_map.get(url, 0)
             if status == 200: score += 10
-            elif status in (401, 403): score += 25
+            elif status in (401, 403): score += 35 # High interest in forbidden/unauthorized endpoints
                 
             techs = tech_map.get(url, [])
-            if any(t in techs for t in ["GraphQL", "Swagger", "Jenkins", "Jira", "Spring"]):
-                score += 30
+            # Priority techs that warrant immediate investigation
+            if any(t in techs for t in ["GraphQL", "Swagger", "Jenkins", "Jira", "Spring", "Django", "FastAPI"]):
+                score += 40
 
             score = min(score, 100)
-            if score >= 60: label = "HIGH VALUE"
-            elif score >= 30: label = "MEDIUM VALUE"
+            if score >= 45: label = "HIGH VALUE"
+            elif score >= 25: label = "MEDIUM VALUE"
 
             if label != "LOW VALUE" or score > 10:
                 ranked_targets.append({
