@@ -180,22 +180,42 @@ import threading
 
 class ProgressBar:
     """
-    Real-time multi-line progress tracker with ETA and speed calculation.
+    Production-grade CLI Dashboard for real-time observability.
+    Supports hierarchical tracking: Stage -> Batch -> Tasks.
     """
-    def __init__(self, stage_num: int, stage_name: str, total: int, total_stages: int = 17):
+    def __init__(self, stage_num: int, stage_name: str, total_tasks: int, total_stages: int = 17):
         self.stage_num = stage_num
         self.stage_name = stage_name
-        self.total = max(1, total)
+        self.total = max(1, total_tasks)
         self.total_stages = total_stages
+        
         self.completed = 0
         self.failed = 0
+        self.batch_current = 0
+        self.batch_total = 0
+        
         self.start_time = time.time()
         self.lock = threading.Lock()
         self._last_line_count = 0
         self._active = True
 
-        # Initial draw
+        # Initial Draw
+        self._draw_header()
         self.update(0)
+
+    def _draw_header(self):
+        header = (
+            f"\n{Colors.CYAN}╔{ '═'*38 }╗\n"
+            f"║   {Colors.BOLD}BUGHUNTER PRO v2.0{Colors.RESET}{Colors.CYAN}                 ║\n"
+            f"╚{ '═'*38 }╝{Colors.RESET}\n"
+        )
+        sys.stdout.write(header)
+        sys.stdout.flush()
+
+    def set_batch(self, current: int, total: int):
+        with self.lock:
+            self.batch_current = current
+            self.batch_total = total
 
     def update(self, inc: int = 1, status: str = "Running...", is_fail: bool = False):
         if not self._active:
@@ -210,27 +230,32 @@ class ProgressBar:
             speed = self.completed / elapsed if elapsed > 0 else 0
             remaining = self.total - self.completed
             
-            # Simple Smoothing for ETA
+            # ETA Calculation
             if self.completed > 0:
                 eta = (elapsed / self.completed) * remaining
             else:
                 eta = 0
             
             eta_str = f"{int(eta)}s" if eta < 60 else f"{int(eta//60)}m {int(eta%60)}s"
-            percent = int((self.completed / self.total) * 100)
+            percent = int((self.completed / self.total) * 100) if self.total > 0 else 0
             
             # ANSI escape codes for multi-line overwrite
-            # Move cursor up to previous drawn lines
             if self._last_line_count > 0:
                 sys.stdout.write(f"\033[{self._last_line_count}F")
             
-            # Build output
+            # Dashboard Layout
             output = (
-                f"{Colors.BOLD}{Colors.CYAN}[STAGE {self.stage_num}/{self.total_stages} — {self.stage_name}]{Colors.RESET}\n"
-                f"Progress: {self.completed}/{self.total} ({percent}%) | Failed: {self.failed}\n"
-                f"Speed: {speed:.1f} t/s | ETA: {eta_str} remaining\n"
-                f"Status: {status}\033[K\n"
+                f"{Colors.BOLD}{Colors.YELLOW}[STAGE {self.stage_num}/{self.total_stages} — {self.stage_name}]{Colors.RESET}\n\n"
+                f"  Tasks   : {self.completed}/{self.total} ({percent}%)\n"
+                f"  Success : {Colors.GREEN}{self.completed - self.failed}{Colors.RESET} | Failed: {Colors.RED}{self.failed}{Colors.RESET}\n"
+                f"  Speed   : {speed:.1f} tasks/sec\n"
+                f"  ETA     : {eta_str} remaining\n\n"
             )
+            
+            if self.batch_total > 0:
+                output += f"  Batch   : {self.batch_current}/{self.batch_total}\n"
+            
+            output += f"  Status  : {status[:60]}\033[K\n"
             
             self._last_line_count = output.count('\n')
             sys.stdout.write(output)
@@ -241,11 +266,12 @@ class ProgressBar:
             return
         
         with self.lock:
-            # Clear the progress block and print a standard log
             if self._last_line_count > 0:
                 sys.stdout.write(f"\033[{self._last_line_count}F")
                 sys.stdout.write("\033[J")
             
-            log(f"{Colors.GREEN}[✓]{Colors.RESET} Stage {self.stage_num}: {self.stage_name} — {final_msg}", Colors.WHITE)
+            log(f"{Colors.GREEN}[✓] STAGE {self.stage_num} COMPLETE: {self.stage_name}{Colors.RESET}", Colors.WHITE)
+            log(f"    {final_msg}\n", Colors.CYAN)
             self._active = False
             self._last_line_count = 0
+

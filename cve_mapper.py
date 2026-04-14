@@ -6,6 +6,8 @@ from typing import List, Dict, Any, Set, Tuple
 
 from utils import log, Colors, save_json, load_json
 
+from core import PipelineContext, batcher
+
 class CVEMapper:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
@@ -21,43 +23,50 @@ class CVEMapper:
                 log(f"[cve_mapper] Failed to load {self.cve_db_path}: {e}", Colors.YELLOW)
         return {}
 
-    def process(self, nuclei_findings: List[Dict]) -> List[Dict]:
-        """Process, enrich, and prioritize raw Nuclei findings."""
+    def run(self, data: List[Dict], context: PipelineContext, pb=None) -> List[Dict]:
+        """
+        Process, enrich, and prioritize raw Nuclei findings.
+        """
+        nuclei_findings = data
         if not nuclei_findings:
             return []
 
-        log(f"[cve_mapper] Processing {len(nuclei_findings)} raw Nuclei findings...", Colors.CYAN)
-        
+        pb.update(0, status="Initializing CVE Mapping & Exploit Intel...")
         enriched_findings = []
         
-        # 1. Map and Enrich
-        for finding in nuclei_findings:
-            # Noise filter: Skip purely informational or very low confidence findings if desired
-            # But we keep them for standard intelligence unless strictly "info"
-            info = finding.get("info", {})
-            severity = info.get("severity", "info").upper()
-            
-            # Simple noise filter
-            if severity == "INFO" and "fuzz" in finding.get("template-id", "").lower():
-                continue
+        # Batch processing for consistency
+        batches = list(batcher(nuclei_findings, size=500))
+        pb.set_batch(0, len(batches))
 
-            cves = self._extract_cves(finding)
-            exploitability = self._score_exploitability(finding, cves)
-            impact, real_severity = self._calculate_impact(finding, exploitability)
-            attack_path = self._suggest_attack_path(finding)
+        for i, batch in enumerate(batches):
+            pb.set_batch(i + 1, len(batches))
+            for finding in batch:
+                info = finding.get("info", {})
+                severity = info.get("severity", "info").upper()
+                
+                # Noise filter
+                if severity == "INFO" and "fuzz" in finding.get("template-id", "").lower():
+                    pb.update(1, status="Skipping noise finding...")
+                    continue
 
-            enriched = {
-                "url": finding.get("matched-at", finding.get("host", "")),
-                "template": finding.get("template-id", "unknown"),
-                "cves": list(cves),
-                "original_severity": severity,
-                "adjusted_severity": real_severity,
-                "exploitability": exploitability,
-                "impact": impact,
-                "next_step": attack_path,
-                "raw_finding": finding
-            }
-            enriched_findings.append(enriched)
+                cves = self._extract_cves(finding)
+                exploitability = self._score_exploitability(finding, cves)
+                impact, real_severity = self._calculate_impact(finding, exploitability)
+                attack_path = self._suggest_attack_path(finding)
+
+                enriched = {
+                    "url": finding.get("matched-at", finding.get("host", "")),
+                    "template": finding.get("template-id", "unknown"),
+                    "cves": list(cves),
+                    "original_severity": severity,
+                    "adjusted_severity": real_severity,
+                    "exploitability": exploitability,
+                    "impact": impact,
+                    "next_step": attack_path,
+                    "raw_finding": finding
+                }
+                enriched_findings.append(enriched)
+                pb.update(1, status=f"Mapped: {enriched['template']}")
 
         # 2. Filter noise heavily
         valid_findings = [f for f in enriched_findings if f["exploitability"] >= 10 or f["adjusted_severity"] in ["CRITICAL", "HIGH", "MEDIUM"]]
@@ -77,8 +86,8 @@ class CVEMapper:
         self._write_prioritized_vulns(prioritized)
         self._write_exploit_intel(clusters)
 
-        log(f"[cve_mapper] Mapped {len(prioritized)} actionable vulnerabilities.", Colors.GREEN)
         return prioritized
+
 
     def _extract_cves(self, finding: Dict) -> Set[str]:
         """Extract CVE IDs using template metadata and regex."""

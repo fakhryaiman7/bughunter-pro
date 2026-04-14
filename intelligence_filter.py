@@ -8,13 +8,19 @@ from pathlib import Path
 
 from utils import log, Colors
 
+from core import PipelineContext, batcher
+
 class FilterPipeline:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
 
-    def run(self, raw_subdomains: List[str], scope: List[str], pb=None) -> Tuple[List[str], Dict[str, Any]]:
-        if pb: pb.update(0, status="Starting Quality Filter Pipeline...")
-        log("[filter] Starting Quality Filter Pipeline", Colors.CYAN)
+    def run(self, data: List[str], context: PipelineContext, pb=None) -> Tuple[List[str], Dict[str, Any]]:
+        """
+        Processes subdomains in batches to avoid memory spikes.
+        """
+        raw_subdomains = data
+        pb.update(0, status="Starting Intelligence Filtering Pipeline...")
+        
         stats = {
             "raw": len(raw_subdomains),
             "wildcard_domains_detected": {},
@@ -26,97 +32,83 @@ class FilterPipeline:
         deduped = list(set([s.strip().lower() for s in raw_subdomains if s.strip()]))
 
         # 2. Wildcard Detection
-        wildcards = self._detect_wildcards(scope)
+        wildcards = self._detect_wildcards(context.scope)
         stats["wildcard_domains_detected"] = wildcards
-        if wildcards:
-            log(f"[filter] Detected {len(wildcards)} wildcard domains: {list(wildcards.keys())}", Colors.YELLOW)
 
-        # 3. Filter Noise and Wildcards
+        # 3. Filter Noise and Wildcards (Batch Processing)
         clean_subdomains = []
-        for sub in deduped:
-            if self._is_wildcard(sub, wildcards, scope):
-                stats["noise_removed"] += 1
-                continue
-            if self._is_noise(sub):
-                stats["noise_removed"] += 1
-                continue
-            clean_subdomains.append(sub)
-            if pb: pb.update(1, status=f"Filtered {sub}")
+        batches = list(batcher(deduped, size=1000))
+        pb.set_batch(0, len(batches))
+
+        for i, batch in enumerate(batches):
+            pb.set_batch(i + 1, len(batches))
+            for sub in batch:
+                if self._is_wildcard(sub, wildcards, context.scope):
+                    stats["noise_removed"] += 1
+                    continue
+                if self._is_noise(sub):
+                    stats["noise_removed"] += 1
+                    continue
+                clean_subdomains.append(sub)
+                pb.update(1, status=f"Filtered {len(clean_subdomains)} assets...")
 
         stats["clean_count"] = len(clean_subdomains)
-        log(f"[filter] Removed {stats['noise_removed']} noise/wildcard entries", Colors.GREEN)
-        
         return clean_subdomains, stats
 
-    def score_and_rank(self, alive_urls: List[str], tech_map: Dict[str, List[str]], status_map: Dict[str, int] = None, pb=None) -> List[Dict]:
-        """Scores validated endpoints from 0-100 based on keywords, tech, and responses."""
-        if pb: pb.update(0, status="Fetching target statuses for ranking...")
-        import requests
+    def score_and_rank(self, alive_urls: List[str], tech_map: Dict[str, List[str]], context: PipelineContext, pb=None) -> List[Dict]:
+        """Scores endpoints based on intelligence signatures."""
+        pb.update(0, status="Scoring and ranking assets...")
         ranked_targets = []
-        if status_map is None:
-            status_map = {}
-            def get_status(url):
-                try:
-                    r = requests.get(url, timeout=5, verify=False, allow_redirects=False)
-                    return url, r.status_code
-                except Exception:
-                    return url, 0
-            with ThreadPoolExecutor(max_workers=20) as ex:
-                futures = [ex.submit(get_status, url) for url in alive_urls]
-                from concurrent.futures import as_completed
+        
+        # Batch status checking if not provided
+        status_map = {}
+        
+        def get_status(url):
+            try:
+                r = context.session.get(url, timeout=5, verify=False, allow_redirects=False)
+                return url, r.status_code
+            except Exception:
+                return url, 0
+
+        batches = list(batcher(alive_urls, size=200))
+        pb.set_batch(0, len(batches))
+
+        for i, batch in enumerate(batches):
+            pb.set_batch(i + 1, len(batches))
+            with ThreadPoolExecutor(max_workers=context.get_config("threads", 10)) as ex:
+                futures = [ex.submit(get_status, url) for url in batch]
                 for fut in as_completed(futures):
                     url, status = fut.result()
                     status_map[url] = status
-                    if pb: pb.update(1, status=f"Checked status of {url}")
-                    
+                    pb.update(1, status=f"Ranking: {url}")
+
         for url in alive_urls:
             score = 0
             label = "LOW VALUE"
             
-            # 1. Keywords
+            # Use shared logic...
             if re.search(r'(api|admin|dev|staging|test|v1|v2|graphql|dashboard)', url, re.I):
                 score += 30
                 
-            # 2. Response Status
             status = status_map.get(url, 0)
-            if status == 200:
-                score += 10
-            elif status in (301, 302):
-                score += 5
-            elif status in (401, 403, 404):
-                if status == 404:
-                    score += 0
-                else:
-                    score += 25  # High value if protected
+            if status == 200: score += 10
+            elif status in (401, 403): score += 25
                 
-            # 3. Tech hints
             techs = tech_map.get(url, [])
-            if any(t in techs for t in ["GraphQL", "Swagger", "Jenkins", "Jira", "Kubernetes", "Docker", "MongoDB", "Redis", "Spring"]):
+            if any(t in techs for t in ["GraphQL", "Swagger", "Jenkins", "Jira", "Spring"]):
                 score += 30
-            elif len(techs) > 0:
-                score += 10
 
             score = min(score, 100)
-            
-            if score >= 60:
-                label = "HIGH VALUE"
-            elif score >= 30:
-                label = "MEDIUM VALUE"
-            elif score < 15 and re.search(r'(cdn|static|assets)', url, re.I):
-                label = "NOISE"
+            if score >= 60: label = "HIGH VALUE"
+            elif score >= 30: label = "MEDIUM VALUE"
 
-            if label != "NOISE":
+            if label != "LOW VALUE" or score > 10:
                 ranked_targets.append({
-                    "url": url,
-                    "score": score,
-                    "label": label,
-                    "tech": techs,
-                    "status": status
+                    "url": url, "score": score, "label": label, "tech": techs, "status": status
                 })
 
-        # Sort targets by score descending
-        ranked_targets = sorted(ranked_targets, key=lambda x: x["score"], reverse=True)
-        return ranked_targets
+        return sorted(ranked_targets, key=lambda x: x["score"], reverse=True)
+
 
     def _detect_wildcards(self, domains: List[str]) -> Dict[str, Set[str]]:
         wildcards = {}
