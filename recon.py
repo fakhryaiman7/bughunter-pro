@@ -405,7 +405,11 @@ class ReconEngine:
                 "gowitness", "file",
                 "-f", str(hosts_file),
                 "--destination", str(screens_dir),
-                "--timeout", "10",
+                "--timeout", "15",
+                "--chrome-flag=--no-sandbox",
+                "--chrome-flag=--disable-gpu",
+                "--chrome-flag=--disable-dev-shm-usage",
+                "--chrome-flag=--disable-software-rasterizer"
             ], timeout=300)
         else:
             log("[recon] Taking screenshots with eyewitness", Colors.CYAN)
