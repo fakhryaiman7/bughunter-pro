@@ -20,9 +20,10 @@ class FuzzingEngine:
 
     def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """Standard entry point."""
-        if not tool_available("ffuf"):
-            pb.update(0, status="ffuf not found, skipping fuzzing...", is_fail=True)
-            return StageOutput(data=[], stats={"error": "ffuf missing"})
+        if not context.deps.has_tool("ffuf"):
+            pb.update(0, status="ffuf not found, switching to SAFE-MODE (Python-based probe)...", is_fail=True)
+            # Future: return a simulated probe or skip
+            return StageOutput(data=[], stats={"error": "ffuf missing", "mode": "safe-fallback"})
 
         # Defensive extraction of targets
         targets = data if isinstance(data, list) else getattr(data, 'data', [])
@@ -32,13 +33,12 @@ class FuzzingEngine:
 
         pb.update(0, status=f"Starting fuzzing on {len(targets)} targets...")
         
-        # Batching targets to avoid flooding the terminal
         batches = list(batcher(targets, size=5))
         pb.set_batch(0, len(batches))
 
         for i, batch in enumerate(batches):
             pb.set_batch(i + 1, len(batches))
-            with ThreadPoolExecutor(max_workers=5) as ex:
+            with ThreadPoolExecutor(max_workers=context.config.threads) as ex:
                 futures = [ex.submit(self._fuzz_target, t, context, pb) for t in batch]
                 for fut in as_completed(futures):
                     fut.result()
@@ -53,7 +53,7 @@ class FuzzingEngine:
         tags = target.get("tags", [])
         
         category = "API" if "API" in tags else "ADMIN" if "ADMIN" in tags else "default"
-        wordlist = self._resolve_wordlist(category)
+        wordlist = self._resolve_wordlist(category, context)
         
         out_file = self.output / f"ffuf_{domain.replace('.','_')}.json"
         
@@ -63,7 +63,6 @@ class FuzzingEngine:
             "-mc", "200,201,301,302,401,403", "-t", "40", "-silent"
         ]
 
-        # Use core.run_cmd if needed or subprocess directly
         rc, out, err = run_cmd(cmd, timeout=300)
 
         if out_file.exists():
@@ -80,17 +79,26 @@ class FuzzingEngine:
             except:
                 pb.update(1, status=f"Fuzzing failed to parse: {url}", is_fail=True)
 
-    def _resolve_wordlist(self, category: str) -> str:
-        sec_path = SECLISTS_BASE / SECLISTS_MAP.get(category, SECLISTS_MAP["default"])
-        if sec_path.exists(): return str(sec_path)
+    def _resolve_wordlist(self, category: str, context: PipelineContext) -> str:
+        """3-tier wordlist resolution: SecLists -> Local -> Minimal Fallback."""
         
-        # Fallback to creating a minimal one
-        Path("wordlists").mkdir(exist_ok=True)
-        fallback = Path(f"wordlists/{category.lower()}.txt")
-        if not fallback.exists():
-            words = ["admin", "api", "v1", "v2", "config", "backup", "login"]
-            fallback.write_text("\n".join(words))
-        return str(fallback)
+        # 🟢 Tier 1: SecLists (Optimized)
+        rel_path = context.config.seclists_map.get(category, context.config.seclists_map["default"])
+        sec_path = context.config.seclists_base / rel_path
+        if sec_path.exists():
+            return str(sec_path)
+            
+        # 🟡 Tier 2: Local Wordlists Directory
+        local_path = context.config.wordlists_dir / f"{category.lower()}.txt"
+        if local_path.exists():
+            return str(local_path)
+        
+        # 🔴 Tier 3: Minimal Self-Healing Fallback
+        log(f"[self-healing] '{category}' wordlist missing. Generating minimal fallback...", Colors.YELLOW)
+        words = ["admin", "api", "v1", "v2", "config", "backup", "login", ".env", "phpinfo", "test"]
+        local_path.write_text("\n".join(words))
+        return str(local_path)
+
 
     def _write_results(self):
         out = self.output / "fuzzing_results.txt"

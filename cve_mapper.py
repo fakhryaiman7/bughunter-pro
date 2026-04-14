@@ -11,24 +11,27 @@ from core import PipelineContext, batcher, StageOutput
 class CVEMapper:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
-        self.cve_db_path = Path("cve_database.json")
-        self.cve_db = self._load_cve_db()
+        self.cve_db = {}
 
-    def _load_cve_db(self) -> Dict[str, Any]:
-        """Load offline CVE database if available."""
-        if self.cve_db_path.exists():
+    def _load_cve_db(self, context: PipelineContext) -> Dict[str, Any]:
+        """Load offline CVE database using path from config."""
+        db_path = context.config.cve_db_path
+        if db_path.exists():
             try:
-                return load_json(self.cve_db_path, default={})
+                return load_json(db_path, default={})
             except Exception as e:
-                log(f"[cve_mapper] Failed to load {self.cve_db_path}: {e}", Colors.YELLOW)
+                log(f"[cve_mapper] Failed to load {db_path}: {e}", Colors.YELLOW)
         return {}
+
 
     def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """
         Process, enrich, and prioritize raw Nuclei findings.
         """
         pb.update(0, status="Initializing CVE Mapping & Exploit Intel...")
+        self.cve_db = self._load_cve_db(context)
         enriched_findings = []
+
         
         # Defensive extraction of findings
         nuclei_findings = data if isinstance(data, list) else getattr(data, 'data', [])

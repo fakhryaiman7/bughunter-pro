@@ -7,6 +7,134 @@ from typing import List, Dict, Any, Optional, Generator
 from functools import wraps
 from utils import log, Colors
 
+import os
+import shutil
+
+class PipelineConfig:
+    """
+    Centralized configuration management.
+    Handles environment variables, OS-specific defaults, and runtime overrides.
+    """
+    def __init__(self, args: argparse.Namespace):
+        self.threads = getattr(args, "threads", 10)
+        self.timeout = 30 # Default timeout for network operations
+        
+        # Wordlist resolution paths
+        self.seclists_base = self._detect_seclists(getattr(args, "seclists_path", ""))
+        self.wordlists_dir = Path("wordlists")
+        self.wordlists_dir.mkdir(exist_ok=True)
+
+        # ── Intelligence Patterns ──────────────────
+        self.seclists_map = {
+            "default": "Discovery/Web-Content/common.txt",
+            "API":     "Discovery/Web-Content/api/api-endpoints.txt",
+            "ADMIN":   "Discovery/Web-Content/AdminPanels.fuzz.txt",
+        }
+
+        self.sqli_errors = [
+            r"sql syntax", r"mysql_fetch", r"ORA-\d+",
+            r"unclosed quotation", r"pg_exec", r"SQLite3::",
+            r"SQLSTATE", r"syntax error.*sql",
+        ]
+
+        self.sensitive_patterns = {
+            "email":       r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+            "aws_key":     r"AKIA[0-9A-Z]{16}",
+            "aws_secret":  r"(?i)aws.{0,20}secret.{0,20}['\"]([A-Za-z0-9/+=]{40})['\"]",
+            "jwt":         r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*",
+            "private_key": r"-----BEGIN (RSA |EC )?PRIVATE KEY-----",
+            "slack_token": r"xox[baprs]-[A-Za-z0-9\-]+",
+        }
+
+        self.admin_paths = ["/admin", "/admin/login", "/administrator", "/dashboard", "/manage"]
+        self.debug_paths = ["/debug", "/test", "/trace", "/phpinfo.php", "/.env", "/server-status"]
+        self.sensitive_files = ["/.env", "/config.json", "/.htpasswd", "/.git/config", "/wp-config.php"]
+        
+        self.takeover_fingerprints = {
+            "GitHub Pages":     "There isn't a GitHub Pages site here",
+            "Heroku":           "No such app",
+            "AWS S3":           "NoSuchBucket",
+            "Azure":            "is not configured for",
+        }
+
+        self.waf_signatures = {
+            "Cloudflare":     ["cloudflare", "cf-ray"],
+            "Akamai":         ["akamai", "akamaighost"],
+            "Incapsula":      ["incap_ses", "visid_incap"],
+        }
+
+        self.security_headers = [
+            "Strict-Transport-Security", "Content-Security-Policy",
+            "X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy"
+        ]
+
+        self.ssrf_canaries = [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://127.0.0.1:80",
+        ]
+
+        self.redirect_payloads = ["//evil.com", "https://evil.com", "/\\evil.com"]
+        self.redirect_params = ["redirect", "url", "next", "u", "link", "t", "r", "goto", "target"]
+        
+        self.ssrf_params = ["url", "redirect", "next", "return", "callback", "fetch", "target", "link"]
+        
+        self.backup_extensions = [".bak", ".old", ".zip", ".tar.gz", ".1", "~", ".swp"]
+        
+        self.graphql_paths = ["/graphql", "/api/graphql", "/v1/graphql", "/v2/graphql", "/graphiql"]
+        self.graphql_query = '{"query":"{__schema{queryType{name}mutationType{name}subscriptionType{name}types{...FullType}directives{name description locations args{...InputValue}}}}fragment FullType on __Type{kind name description fields(includeDeprecated:true){name description args{...InputValue}type{...TypeRef}isDeprecated deprecationReason}inputFields{...InputValue}interfaces{...TypeRef}enumValues(includeDeprecated:true){name description isDeprecated deprecationReason}possibleTypes{...TypeRef}}fragment InputValue on __InputValue{name description type{...TypeRef}defaultValue}fragment TypeRef on __Type{kind name充分type{kind充分name充分type{kind充分name充分type{kind充分name充分type{kind充分name充分type{kind充分name充分type{kind充分name}}}}}}}'
+        
+        self.cve_db_path = Path("cve_database.json")
+
+
+    def _detect_seclists(self, override: str) -> Path:
+        if override:
+            p = Path(override)
+            if p.exists(): return p
+        
+        # OS Defaults
+        paths = [
+            Path("/usr/share/seclists"),             # Kali / Debian
+            Path("/opt/seclists"),                  # Custom Linux
+            Path("C:/Tools/seclists"),              # Common Windows path
+            Path("./wordlists/seclists"),           # Local fallback
+        ]
+        
+        for p in paths:
+            if p.exists():
+                return p
+        
+        # Environment Variable override
+        env_p = os.environ.get("SECLISTS_BASE")
+        if env_p:
+            return Path(env_p)
+
+        return Path("/usr/share/seclists") # Absolute default (Kali)
+
+class DependencyGuard:
+    """
+    Self-healing dependency management layer.
+    Checks for tool availability and provides warnings/fallbacks.
+    """
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.status = {}
+
+    def validate(self, tools: List[str]):
+        """Check availability of external binaries."""
+        for tool in tools:
+            path = shutil.which(tool)
+            self.status[tool] = {"found": bool(path), "path": path}
+            if not path:
+                log(f"[DEPENDENCY WARNING] Tool '{tool}' not found in PATH.", Colors.YELLOW)
+
+    def has_tool(self, tool: str) -> bool:
+        return self.status.get(tool, {}).get("found", False)
+
+    def has_seclists(self) -> bool:
+        return self.config.seclists_base.exists()
+
+
 class PipelineContext:
     """
     Centralized state container for the BugHunter Pro pipeline.
@@ -19,6 +147,10 @@ class PipelineContext:
         self.args = args
         self.metadata = {}
         
+        # New Architecture Layers
+        self.config = PipelineConfig(args)
+        self.deps = DependencyGuard(self.config)
+        
         # Shared session for connection pooling
         self.session = requests.Session()
         self.session.headers.update({
@@ -26,7 +158,9 @@ class PipelineContext:
         })
 
     def get_config(self, key: str, default: Any = None) -> Any:
-        return getattr(self.args, key, default)
+        # Backward compatibility for existing modules
+        return getattr(self.args, key, getattr(self.config, key, default))
+
 
 
 class StageOutput:

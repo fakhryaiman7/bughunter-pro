@@ -114,19 +114,20 @@ class ReconEngine:
 
         for i, batch in enumerate(batches):
             pb.set_batch(i + 1, len(batches))
-            if tool_available("httpx"):
+            if context.deps.has_tool("httpx"):
                 temp_in = self.output / f"batch_{i}.tmp"
                 temp_in.write_text("\n".join(batch))
                 rc, out, err = run_cmd([
                     "httpx", "-l", str(temp_in), "-silent", "-threads", 
-                    str(context.get_config("threads", 10)), "-timeout", "5"
+                    str(context.config.threads), "-timeout", "5"
                 ])
                 batch_alive = [l.strip() for l in out.splitlines() if l.strip()]
                 alive.extend(batch_alive)
                 pb.update(len(batch), status=f"Batch {i+1} complete")
                 if temp_in.exists(): temp_in.unlink()
             else:
-                with ThreadPoolExecutor(max_workers=context.get_config("threads", 10)) as ex:
+                pb.update(0, status="httpx missing, using Python fallback (slower)", is_fail=True)
+                with ThreadPoolExecutor(max_workers=context.config.threads) as ex:
                     futures = {ex.submit(self._check_url, s, context): s for s in batch}
                     for fut in as_completed(futures):
                         res = fut.result()
@@ -134,6 +135,7 @@ class ReconEngine:
                         pb.update(1, status=f"Checked: {futures[fut]}")
 
         return StageOutput(data=list(set(alive)), stats={"alive": len(alive)})
+
 
     # ══════════════════════════════════════════
     #  4. Tech Detection
@@ -148,7 +150,7 @@ class ReconEngine:
 
         for i, batch in enumerate(batches):
             pb.set_batch(i + 1, len(batches))
-            with ThreadPoolExecutor(max_workers=context.get_config("threads", 10)) as ex:
+            with ThreadPoolExecutor(max_workers=context.config.threads) as ex:
                 futures = {ex.submit(self._fetch_tech, url, context): url for url in batch}
                 for fut in as_completed(futures):
                     url = futures[fut]
@@ -162,18 +164,18 @@ class ReconEngine:
     #  5. Discovery Source Implementation
     # ══════════════════════════════════════════
 
-    def _subfinder(self, domain: str) -> List[str]:
-        if not tool_available("subfinder"): return []
+    def _subfinder(self, domain: str, context: PipelineContext) -> List[str]:
+        if not context.deps.has_tool("subfinder"): return []
         rc, out, err = run_cmd(["subfinder", "-d", domain, "-silent", "-all"])
         return [l.strip() for l in out.splitlines() if l.strip()]
 
-    def _amass(self, domain: str) -> List[str]:
-        if not tool_available("amass"): return []
+    def _amass(self, domain: str, context: PipelineContext) -> List[str]:
+        if not context.deps.has_tool("amass"): return []
         rc, out, err = run_cmd(["amass", "enum", "-passive", "-d", domain, "-silent"], timeout=90)
         return [l.strip() for l in out.splitlines() if l.strip()]
 
-    def _assetfinder(self, domain: str) -> List[str]:
-        if not tool_available("assetfinder"): return []
+    def _assetfinder(self, domain: str, context: PipelineContext) -> List[str]:
+        if not context.deps.has_tool("assetfinder"): return []
         rc, out, err = run_cmd(["assetfinder", "--subs-only", domain])
         return [l.strip() for l in out.splitlines() if l.strip()]
 
@@ -205,8 +207,8 @@ class ReconEngine:
         return []
 
     def _dnsx_bruteforce(self, domain: str, context: PipelineContext) -> List[str]:
-        if not tool_available("dnsx"): return []
-        rc, out, err = run_cmd(["dnsx", "-d", domain, "-silent", "-threads", "50"])
+        if not context.deps.has_tool("dnsx"): return []
+        rc, out, err = run_cmd(["dnsx", "-d", domain, "-silent", "-threads", str(context.config.threads)])
         return [l.strip() for l in out.splitlines() if l.strip()]
 
     def _cert_sans(self, domain: str) -> List[str]:
@@ -228,7 +230,7 @@ class ReconEngine:
         for proto in ["https://", "http://"]:
             try:
                 url = f"{proto}{sub}"
-                context.session.get(url, timeout=5, verify=False, allow_redirects=True)
+                context.session.get(url, timeout=context.config.timeout, verify=False, allow_redirects=True)
                 return url
             except: continue
         return None
@@ -236,7 +238,7 @@ class ReconEngine:
     def _fetch_tech(self, url: str, context: PipelineContext) -> List[str]:
         techs = []
         try:
-            r = context.session.get(url, timeout=5, verify=False)
+            r = context.session.get(url, timeout=context.config.timeout, verify=False)
             content = (str(r.headers) + r.text).lower()
             sigs = {"Cloudflare": "cloudflare", "Nginx": "nginx", "Apache": "apache", "WordPress": "wp-content", "React": "react"}
             for name, sig in sigs.items():
@@ -278,14 +280,11 @@ class ReconEngine:
     def run_nuclei(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """Runs template-based vulnerability scanning via Nuclei."""
         pb.update(0, status="Running Nuclei Vulnerability Scan...")
-        if not tool_available("nuclei"):
+        if not context.deps.has_tool("nuclei"):
             return StageOutput(data=[], stats={"vulnerabilities": 0}, meta={"error": "nuclei not found"})
         
         # Normalize targets to list
-        clean_targets = []
-        for chunk in batcher(data, size=len(data) if data else 1):
-            clean_targets = chunk
-            break
+        clean_targets = data if isinstance(data, list) else getattr(data, 'data', [])
 
         temp_file = self.output / "nuclei_targets.txt"
         temp_file.write_text("\n".join(clean_targets))

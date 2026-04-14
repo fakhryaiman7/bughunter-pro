@@ -82,7 +82,7 @@ class FilterPipeline:
 
         for i, batch in enumerate(batches):
             pb.set_batch(i + 1, len(batches))
-            with ThreadPoolExecutor(max_workers=context.get_config("threads", 10)) as ex:
+            with ThreadPoolExecutor(max_workers=context.config.threads) as ex:
                 futures = [ex.submit(get_status, url) for url in batch]
                 for fut in as_completed(futures):
                     url, status = fut.result()

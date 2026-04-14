@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 from utils import banner, log, Colors, ensure_dirs, validate_domain, ProgressBar
-from core import PipelineContext, validate_module
+from core import PipelineContext, validate_module, PipelineConfig, DependencyGuard
 from recon import ReconEngine
 from intelligence_filter import FilterPipeline
 from cve_mapper import CVEMapper
@@ -23,11 +23,18 @@ class BugHunterPro:
         self.output = Path(args.output)
         ensure_dirs(self.output)
 
-        # 1. Initialize Context
-        scope = self._load_scope(args.scope) if args.scope else [args.target]
-        self.context = PipelineContext(args.target, scope, self.output, args)
+        # 1. Initialize Config & Dependencies (Centralized)
+        self.config = PipelineConfig(args)
+        self.deps   = DependencyGuard()
         
-        # 2. Initialize Engines
+        # 2. Pre-flight Check (Fail Fast)
+        self._preflight_check()
+
+        # 3. Initialize Context
+        scope = self._load_scope(args.scope) if args.scope else [args.target]
+        self.context = PipelineContext(args.target, scope, self.output, self.config, self.deps)
+        
+        # 4. Initialize Engines
         self.recon = ReconEngine(self.output)
         self.filter = FilterPipeline(self.output)
         self.cve = CVEMapper(self.output)
@@ -36,7 +43,7 @@ class BugHunterPro:
         self.notifier = Notifier(args)
         self.reporter = ReportEngine(self.output, args.target)
 
-        # 3. Validate Module Contracts (Fail Fast)
+        # 5. Validate Module Contracts
         self._validate_contracts()
 
     def _load_scope(self, scope_file: str) -> list:
@@ -45,6 +52,15 @@ class BugHunterPro:
                 return [l.strip() for l in f if l.strip() and not l.startswith("#")]
         except Exception:
             return []
+
+    def _preflight_check(self):
+        """Validates environment and critical dependencies."""
+        log("[*] Performing dependency pre-flight check...", Colors.CYAN)
+        required = ["httpx", "nuclei", "subfinder"]
+        missing = [t for t in required if not self.deps.has_tool(t)]
+        if missing:
+            log(f"[!] Warning: Missing critical tools: {', '.join(missing)}", Colors.YELLOW)
+            log("[!] Some stages may be skipped or use slower fallbacks.", Colors.YELLOW)
 
     def _validate_contracts(self):
         """Strict validation of module signatures."""
@@ -57,16 +73,10 @@ class BugHunterPro:
 
     def run(self):
         banner()
-        log(f"[*] Engine    : BugHunter Pro v2.0 (Production Grade)", Colors.CYAN)
+        log(f"[*] Engine    : BugHunter Pro v2.0 (Self-Healing Mode)", Colors.CYAN)
         log(f"[*] Target    : {self.context.target}", Colors.CYAN)
         log(f"[*] Scope     : {len(self.context.scope)} domain(s)", Colors.CYAN)
-        log(f"[*] Workspace : {self.output}\n", Colors.CYAN)
-
-    def run(self):
-        banner()
-        log(f"[*] Engine    : BugHunter Pro v2.0 (Production Grade)", Colors.CYAN)
-        log(f"[*] Target    : {self.context.target}", Colors.CYAN)
-        log(f"[*] Scope     : {len(self.context.scope)} domain(s)", Colors.CYAN)
+        log(f"[*] Threads   : {self.config.threads}", Colors.CYAN)
         log(f"[*] Workspace : {self.output}\n", Colors.CYAN)
 
         try:
@@ -177,6 +187,7 @@ def parse_args():
     parser.add_argument("--no-fuzzing", action="store_true")
     parser.add_argument("--no-exploit", action="store_true")
     parser.add_argument("--shodan-key", default="")
+    parser.add_argument("--seclists-path", default="", help="Path to Seclists directory")
     return parser.parse_args()
 
 if __name__ == "__main__":
