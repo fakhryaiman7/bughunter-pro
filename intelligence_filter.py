@@ -8,28 +8,33 @@ from pathlib import Path
 
 from utils import log, Colors
 
-from core import PipelineContext, batcher
+from core import PipelineContext, batcher, StageOutput
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class FilterPipeline:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
 
-    def run(self, data: List[str], context: PipelineContext, pb=None) -> Tuple[List[str], Dict[str, Any]]:
+    def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """
         Processes subdomains in batches to avoid memory spikes.
         """
-        raw_subdomains = data
         pb.update(0, status="Starting Intelligence Filtering Pipeline...")
         
         stats = {
-            "raw": len(raw_subdomains),
             "wildcard_domains_detected": {},
             "noise_removed": 0,
             "clean_count": 0
         }
 
         # 1. Deduplication
-        deduped = list(set([s.strip().lower() for s in raw_subdomains if s.strip()]))
+        clean_input = []
+        for chunk in batcher(data, size=len(data) if data else 1):
+            clean_input = chunk
+            break
+            
+        deduped = list(set([s.strip().lower() for s in clean_input if s.strip()]))
+        stats["raw"] = len(deduped)
 
         # 2. Wildcard Detection
         wildcards = self._detect_wildcards(context.scope)
@@ -53,14 +58,16 @@ class FilterPipeline:
                 pb.update(1, status=f"Filtered {len(clean_subdomains)} assets...")
 
         stats["clean_count"] = len(clean_subdomains)
-        return clean_subdomains, stats
+        return StageOutput(data=clean_subdomains, stats=stats)
 
-    def score_and_rank(self, alive_urls: List[str], tech_map: Dict[str, List[str]], context: PipelineContext, pb=None) -> List[Dict]:
+    def score_and_rank(self, data: Any, tech_map: Dict[str, List[str]], context: PipelineContext, pb=None) -> StageOutput:
         """Scores endpoints based on intelligence signatures."""
         pb.update(0, status="Scoring and ranking assets...")
         ranked_targets = []
         
-        # Batch status checking if not provided
+        alive_urls = data if isinstance(data, list) else getattr(data, 'data', [])
+        
+        # Batch status checking
         status_map = {}
         
         def get_status(url):
@@ -86,7 +93,6 @@ class FilterPipeline:
             score = 0
             label = "LOW VALUE"
             
-            # Use shared logic...
             if re.search(r'(api|admin|dev|staging|test|v1|v2|graphql|dashboard)', url, re.I):
                 score += 30
                 
@@ -107,7 +113,9 @@ class FilterPipeline:
                     "url": url, "score": score, "label": label, "tech": techs, "status": status
                 })
 
-        return sorted(ranked_targets, key=lambda x: x["score"], reverse=True)
+        ranked_sorted = sorted(ranked_targets, key=lambda x: x["score"], reverse=True)
+        return StageOutput(data=ranked_sorted, stats={"high_value": len([r for r in ranked_sorted if r['score'] >= 60])})
+
 
 
     def _detect_wildcards(self, domains: List[str]) -> Dict[str, Set[str]]:

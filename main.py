@@ -62,73 +62,94 @@ class BugHunterPro:
         log(f"[*] Scope     : {len(self.context.scope)} domain(s)", Colors.CYAN)
         log(f"[*] Workspace : {self.output}\n", Colors.CYAN)
 
+    def run(self):
+        banner()
+        log(f"[*] Engine    : BugHunter Pro v2.0 (Production Grade)", Colors.CYAN)
+        log(f"[*] Target    : {self.context.target}", Colors.CYAN)
+        log(f"[*] Scope     : {len(self.context.scope)} domain(s)", Colors.CYAN)
+        log(f"[*] Workspace : {self.output}\n", Colors.CYAN)
+
         try:
             # ── 1. Subdomain Discovery ────────────
             pb = self._get_pb(1, "Subdomain Discovery", len(self.context.scope))
-            subdomains = self.recon.run_discovery(None, self.context, pb)
-            pb.complete(f"Found {len(subdomains)} subdomains")
+            discovery_out = self.recon.run_discovery(None, self.context, pb)
+            subdomains = discovery_out.data
+            pb.complete(f"Found {discovery_out.stats.get('total', 0)} subdomains")
 
             # ── 2. Asset Monitoring ───────────────
             pb = self._get_pb(2, "Asset Monitoring", 1)
-            assets = self.recon.track_assets(subdomains, self.context, pb)
-            pb.complete("History audit finished")
+            assets_out = self.recon.track_assets(subdomains, self.context, pb)
+            pb.complete(f"Detected {assets_out.stats.get('new', 0)} NEW | {assets_out.stats.get('removed', 0)} REMOVED")
 
             # ── 3. Intelligence Filtering ──────────
             pb = self._get_pb(3, "Intelligence Filtering", len(subdomains))
-            stats, filtered_subs = self.filter.run(subdomains, self.context, pb)
-            pb.complete(f"Filtered {len(filtered_subs)} high-quality assets")
+            filter_out = self.filter.run(subdomains, self.context, pb)
+            filtered_subs = filter_out.data
+            pb.complete(f"Filtered {filter_out.stats.get('clean_count', 0)} high-quality assets")
 
             # ── 4. Liveness Probing ───────────────
             pb = self._get_pb(4, "Liveness Probing", len(filtered_subs))
-            alive = self.recon.run_alive_check(filtered_subs, self.context, pb)
-            pb.complete(f"{len(alive)} hosts are ALIVE")
+            alive_out = self.recon.run_alive_check(filtered_subs, self.context, pb)
+            alive = alive_out.data
+            pb.complete(f"{alive_out.stats.get('alive', 0)} hosts are ALIVE")
 
             # ── 5. Tech Detection ─────────────────
             pb = self._get_pb(5, "Technology Detection", len(alive))
-            tech_map = self.recon.run_tech_detect(alive, self.context, pb)
+            tech_out = self.recon.run_tech_detect(alive, self.context, pb)
+            tech_map = tech_out.meta.get("tech_map", {})
             self.context.metadata["tech_map"] = tech_map
-            pb.complete("Fingerprinting finished")
+            pb.complete(f"Fingerprinted {tech_out.stats.get('tech_detected', 0)} endpoints")
 
             # ── 6. Scoring & Ranking ───────────────
             pb = self._get_pb(6, "Quality Scoring & Ranking", len(alive))
-            ranked = self.filter.score_and_rank(alive, tech_map, self.context, pb)
+            ranking_out = self.filter.score_and_rank(alive, tech_map, self.context, pb)
+            ranked = ranking_out.data
             top_targets = [t for t in ranked if t["score"] >= 40]
-            pb.complete(f"Identified {len(top_targets)} high-value attack surfaces")
+            pb.complete(f"Identified {ranking_out.stats.get('high_value', 0)} high-value attack surfaces")
 
             # ── 7. Port Scanning ──────────────────
             pb = self._get_pb(7, "Smart Port Scanning", len(top_targets))
-            port_data = self.recon.run_port_scan([t["url"] for t in top_targets], self.context, pb)
-            pb.complete("Port audit finished")
+            targets_urls = [t["url"] for t in top_targets]
+            port_out = self.recon.run_port_scan(targets_urls, self.context, pb)
+            pb.complete(f"Port audit finished for {port_out.stats.get('scanned', 0)} targets")
 
             # ── 8. Vulnerability Scanning ─────────
-            pb = self._get_pb(8, "Vulnerability Scanning", len(top_targets))
             findings = []
             if not self.args.no_nuclei:
-                findings = self.recon.run_nuclei([t["url"] for t in top_targets], self.context, pb)
-            pb.complete(f"Nuclei found {len(findings)} potential vulns")
+                pb = self._get_pb(8, "Vulnerability Scanning", len(top_targets))
+                vuln_out = self.recon.run_nuclei(targets_urls, self.context, pb)
+                findings = vuln_out.data
+                pb.complete(f"Nuclei found {vuln_out.stats.get('vulnerabilities', 0)} potential vulns")
 
             # ── 9. CVE Intelligence Mapping ───────
-            pb = self._get_pb(9, "CVE Intelligence Mapping", len(findings))
-            mapped_cves = self.cve.run(findings, self.context, pb)
-            pb.complete(f"Mapped {len(mapped_cves)} actionable CVEs")
+            mapped_findings = []
+            if findings:
+                pb = self._get_pb(9, "CVE Intelligence Mapping", len(findings))
+                cve_out = self.cve.run(findings, self.context, pb)
+                mapped_findings = cve_out.data
+                pb.complete(f"Mapped {cve_out.stats.get('mapped_findings', 0)} actionable CVEs")
 
             # ── 10. JS Link Extraction ──────────
             pb = self._get_pb(10, "JS Link Extraction", len(top_targets))
-            js_links = self.recon.run_js_extraction([t["url"] for t in top_targets], self.context, pb)
-            pb.complete(f"Extracted {len(js_links)} deep links")
+            js_out = self.recon.run_js_extraction(targets_urls, self.context, pb)
+            js_links = js_out.data
+            pb.complete(f"Extracted {js_out.stats.get('endpoints', 0)} deep links")
 
             # ── 11. Smart Fuzzing ─────────────────
-            pb = self._get_pb(11, "Targeted API Fuzzing", len(top_targets))
+            fuzz_results = []
             if not self.args.no_fuzzing:
-                self.fuzzer.run(top_targets, self.context, pb)
-            pb.complete("Fuzzing cycle finished")
+                pb = self._get_pb(11, "Targeted API Fuzzing", len(top_targets))
+                fuzz_out = self.fuzzer.run(top_targets, self.context, pb)
+                fuzz_results = fuzz_out.data
+                pb.complete(f"Fuzzing cycle fuzzed {fuzz_out.stats.get('fuzzed_endpoints', 0)} endpoints")
 
             # ── 12. Exploit Audit ───────────────
-            pb = self._get_pb(12, "Exploit Intelligence Audit", len(top_targets))
             exploit_results = []
             if not self.args.no_exploit:
-                exploit_results = self.exploiter.run(top_targets, self.context, pb)
-            pb.complete("Exploit audit finished")
+                pb = self._get_pb(12, "Exploit Intelligence Audit", len(top_targets))
+                exploit_out = self.exploiter.run(top_targets, self.context, pb)
+                exploit_results = exploit_out.data
+                pb.complete(f"Exploit audit found {exploit_out.stats.get('vulnerabilities', 0)} actionable items")
 
             # ── 13. Final Report Generation ───────
             pb = self._get_pb(13, "Intelligence Reporting", 1)
@@ -136,9 +157,15 @@ class BugHunterPro:
             self.notifier.send_summary(ranked, exploit_results)
             pb.complete(f"All updates pushed. Report: {report_path}")
 
+        except KeyboardInterrupt:
+            log("\n[!] Execution interrupted by user.", Colors.YELLOW)
+            sys.exit(0)
         except Exception as e:
             log(f"[FATAL] Global pipeline crash: {e}", Colors.RED)
-            raise e
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="BugHunter Pro v2.0")

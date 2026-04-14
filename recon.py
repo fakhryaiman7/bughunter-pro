@@ -14,7 +14,7 @@ from typing import List, Dict, Set, Optional, Any
 
 import requests
 import urllib3
-from core import PipelineContext, retry, batcher, validate_module
+from core import PipelineContext, retry, batcher, validate_module, StageOutput
 from utils import log, Colors, run_cmd, tool_available, save_json, load_json
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -24,14 +24,15 @@ class ReconEngine:
         self.output = output
         self._prev_assets_file = output / "knowledge" / "prev_assets.json"
 
-    def run(self, data: Any, context: PipelineContext, pb=None):
-        """Standard entry point (satisfies module contract)."""
+    def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Standard entry point."""
         return self.run_discovery(data, context, pb)
+
 
     # ══════════════════════════════════════════
     #  1. Subdomain Discovery
     # ══════════════════════════════════════════
-    def run_discovery(self, data: Any, context: PipelineContext, pb=None) -> List[str]:
+    def run_discovery(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """Orchestrates multi-source subdomain discovery."""
         all_subs: Set[str] = set()
         pb.update(0, status="Initializing Discovery...")
@@ -69,24 +70,23 @@ class ReconEngine:
         with open(self.output / "subdomains.txt", "w") as f:
             f.write("\n".join(subs))
         
-        return subs
+        return StageOutput(data=subs, stats={"total": len(subs)})
+
 
     # ══════════════════════════════════════════
     #  2. Asset Monitoring
     # ══════════════════════════════════════════
-    def track_assets(self, data: List[str], context: PipelineContext, pb=None) -> Dict[str, List[str]]:
-        current_subs = data
+    def track_assets(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Compares assets with previous state for monitoring."""
+        current_subs = data if isinstance(data, list) else getattr(data, 'data', [])
         pb.update(0, status="Comparing assets with previous state...")
+        
         prev_data = load_json(self._prev_assets_file, default={"subdomains": []})
         if isinstance(prev_data, list):
             prev_subs = set(prev_data)
         else:
-            try:
-                prev_subs = set(prev_data.get("subdomains", []))
-            except (AttributeError, TypeError):
-                prev_subs = set()
+            prev_subs = set(prev_data.get("subdomains", []))
 
-        
         new_subs = [s for s in current_subs if s not in prev_subs]
         removed_subs = [s for s in prev_subs if s not in current_subs]
         
@@ -94,18 +94,22 @@ class ReconEngine:
             pb.update(len(new_subs), status=f"Detected {len(new_subs)} NEW subdomains!")
         
         save_json(self._prev_assets_file, {"subdomains": current_subs, "timestamp": str(datetime.now())})
-        return {"new": new_subs, "removed": removed_subs, "all": current_subs}
+        return StageOutput(
+            data=current_subs, 
+            stats={"new": len(new_subs), "removed": len(removed_subs)},
+            meta={"new": new_subs, "removed": removed_subs}
+        )
+
 
     # ══════════════════════════════════════════
     #  3. Liveness Probing
     # ══════════════════════════════════════════
-    def run_alive_check(self, data: List[str], context: PipelineContext, pb=None) -> List[str]:
+    def run_alive_check(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """Validates subdomain liveness using batching."""
-        subdomains = data
         pb.update(0, status="Starting HTTPX/Liveness check...")
         alive = []
         
-        batches = list(batcher(subdomains, size=500))
+        batches = list(batcher(data, size=500))
         pb.set_batch(0, len(batches))
 
         for i, batch in enumerate(batches):
@@ -119,7 +123,7 @@ class ReconEngine:
                 ])
                 batch_alive = [l.strip() for l in out.splitlines() if l.strip()]
                 alive.extend(batch_alive)
-                pb.update(len(batch), status=f"Batch {i+1} complete via httpx")
+                pb.update(len(batch), status=f"Batch {i+1} complete")
                 if temp_in.exists(): temp_in.unlink()
             else:
                 with ThreadPoolExecutor(max_workers=context.get_config("threads", 10)) as ex:
@@ -129,17 +133,17 @@ class ReconEngine:
                         if res: alive.append(res)
                         pb.update(1, status=f"Checked: {futures[fut]}")
 
-        return list(set(alive))
+        return StageOutput(data=list(set(alive)), stats={"alive": len(alive)})
 
     # ══════════════════════════════════════════
     #  4. Tech Detection
     # ══════════════════════════════════════════
-    def run_tech_detect(self, data: List[str], context: PipelineContext, pb=None) -> Dict[str, List[str]]:
-        urls = data
+    def run_tech_detect(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Fingerprints technologies for identified URLs."""
         pb.update(0, status="Starting technology detection...")
         tech_map = {}
         
-        batches = list(batcher(urls, size=200))
+        batches = list(batcher(data, size=200))
         pb.set_batch(0, len(batches))
 
         for i, batch in enumerate(batches):
@@ -151,7 +155,8 @@ class ReconEngine:
                     tech_map[url] = fut.result()
                     pb.update(1, status=f"Tech: {url}")
         
-        return tech_map
+        return StageOutput(data=data, stats={"tech_detected": len(tech_map)}, meta={"tech_map": tech_map})
+
 
     # ══════════════════════════════════════════
     #  5. Discovery Source Implementation
@@ -239,42 +244,61 @@ class ReconEngine:
         except: pass
         return techs
 
-    def run_port_scan(self, data: List[str], context: PipelineContext, pb=None) -> Dict[str, List[int]]:
+    def run_port_scan(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Smart port scanner (stubbed for v2.0)."""
         pb.update(0, status="Starting port scan...")
         results = {}
+        
         batches = list(batcher(data, size=100))
         pb.set_batch(0, len(batches))
+
         for i, batch in enumerate(batches):
             pb.set_batch(i + 1, len(batches))
             for sub in batch:
                 results[sub] = [80, 443]
                 pb.update(1, status=f"Scanned: {sub}")
-        return results
+        return StageOutput(data=data, stats={"scanned": len(results)}, meta={"ports": results})
 
-    def run_js_extraction(self, data: List[str], context: PipelineContext, pb=None) -> List[str]:
+    def run_js_extraction(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Extracts potential API endpoints from JS files."""
         pb.update(0, status="Extracting JS endpoints...")
         endpoints = []
+        
         batches = list(batcher(data, size=50))
         pb.set_batch(0, len(batches))
+
         for i, batch in enumerate(batches):
             pb.set_batch(i + 1, len(batches))
             for url in batch:
-                endpoints.append(f"{url}/api/v1")
+                ep = f"{url}/api/v1"
+                endpoints.append(ep)
                 pb.update(1, status=f"JS Link: {url}")
-        return endpoints
+        return StageOutput(data=endpoints, stats={"endpoints": len(endpoints)})
 
-    def run_nuclei(self, data: List[str], context: PipelineContext, pb=None) -> List[Dict]:
+    def run_nuclei(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Runs template-based vulnerability scanning via Nuclei."""
         pb.update(0, status="Running Nuclei Vulnerability Scan...")
-        if not tool_available("nuclei"): return []
+        if not tool_available("nuclei"):
+            return StageOutput(data=[], stats={"vulnerabilities": 0}, meta={"error": "nuclei not found"})
+        
+        # Normalize targets to list
+        clean_targets = []
+        for chunk in batcher(data, size=len(data) if data else 1):
+            clean_targets = chunk
+            break
+
         temp_file = self.output / "nuclei_targets.txt"
-        temp_file.write_text("\n".join(data))
+        temp_file.write_text("\n".join(clean_targets))
+        
         out_json = self.output / "nuclei_results.json"
         run_cmd(["nuclei", "-l", str(temp_file), "-jsonl", "-o", str(out_json), "-silent", "-severity", "critical,high,medium"])
+        
         results = []
         if out_json.exists():
             with open(out_json) as f:
                 for line in f:
                     try: results.append(json.loads(line))
                     except: continue
-        pb.update(len(data), status="Nuclei scan complete.")
-        return results
+        pb.update(len(clean_targets), status="Nuclei scan complete.")
+        return StageOutput(data=results, stats={"vulnerabilities": len(results)})
+

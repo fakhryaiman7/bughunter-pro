@@ -199,6 +199,9 @@ class ProgressBar:
         self._last_line_count = 0
         self._active = True
 
+        # Task Registry
+        self.task_registry = {}
+
         # Initial Draw
         self._draw_header()
         self.update(0)
@@ -228,11 +231,11 @@ class ProgressBar:
             
             elapsed = time.time() - self.start_time
             speed = self.completed / elapsed if elapsed > 0 else 0
-            remaining = self.total - self.completed
+            remaining = max(0, self.total - self.completed)
             
-            # ETA Calculation
-            if self.completed > 0:
-                eta = (elapsed / self.completed) * remaining
+            # Accurate ETA
+            if speed > 0:
+                eta = remaining / speed
             else:
                 eta = 0
             
@@ -243,17 +246,19 @@ class ProgressBar:
             if self._last_line_count > 0:
                 sys.stdout.write(f"\033[{self._last_line_count}F")
             
-            # Dashboard Layout
+            # Refined Dashboard Layout
             output = (
                 f"{Colors.BOLD}{Colors.YELLOW}[STAGE {self.stage_num}/{self.total_stages} — {self.stage_name}]{Colors.RESET}\n\n"
                 f"  Tasks   : {self.completed}/{self.total} ({percent}%)\n"
                 f"  Success : {Colors.GREEN}{self.completed - self.failed}{Colors.RESET} | Failed: {Colors.RED}{self.failed}{Colors.RESET}\n"
                 f"  Speed   : {speed:.1f} tasks/sec\n"
-                f"  ETA     : {eta_str} remaining\n\n"
+                f"  ETA     : {eta_str} remaining\n"
             )
             
             if self.batch_total > 0:
                 output += f"  Batch   : {self.batch_current}/{self.batch_total}\n"
+            else:
+                output += "\n"
             
             output += f"  Status  : {status[:60]}\033[K\n"
             
@@ -274,4 +279,5 @@ class ProgressBar:
             log(f"    {final_msg}\n", Colors.CYAN)
             self._active = False
             self._last_line_count = 0
+
 

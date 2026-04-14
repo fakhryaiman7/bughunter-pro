@@ -10,17 +10,7 @@ from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils import log, Colors, run_cmd, tool_available
-from core import PipelineContext, batcher
-
-# Wordlists
-SECLISTS_BASE  = Path("/usr/share/seclists")
-LOCAL_WL_BASE  = Path("wordlists")
-
-SECLISTS_MAP = {
-    "default": "Discovery/Web-Content/common.txt",
-    "API":     "Discovery/Web-Content/api/api-endpoints.txt",
-    "ADMIN":   "Discovery/Web-Content/AdminPanels.fuzz.txt",
-}
+from core import PipelineContext, batcher, StageOutput
 
 class FuzzingEngine:
     def __init__(self, output: Path):
@@ -28,15 +18,17 @@ class FuzzingEngine:
         self.results: List[Dict] = []
         self._lock = threading.Lock()
 
-    def run(self, data: List[Dict[str, Any]], context: PipelineContext, pb=None):
-        targets = data
+    def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
+        """Standard entry point."""
         if not tool_available("ffuf"):
             pb.update(0, status="ffuf not found, skipping fuzzing...", is_fail=True)
-            return
+            return StageOutput(data=[], stats={"error": "ffuf missing"})
 
+        # Defensive extraction of targets
+        targets = data if isinstance(data, list) else getattr(data, 'data', [])
         if not targets:
             pb.update(0, status="No high-value targets for fuzzing.")
-            return
+            return StageOutput(data=[], stats={"fuzzed": 0})
 
         pb.update(0, status=f"Starting fuzzing on {len(targets)} targets...")
         
@@ -52,6 +44,8 @@ class FuzzingEngine:
                     fut.result()
 
         self._write_results()
+        return StageOutput(data=self.results, stats={"fuzzed_endpoints": len(self.results)})
+
 
     def _fuzz_target(self, target: Dict, context: PipelineContext, pb: Any):
         url = target["url"]

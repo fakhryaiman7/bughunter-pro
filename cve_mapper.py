@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Set, Tuple
 
 from utils import log, Colors, save_json, load_json
 
-from core import PipelineContext, batcher
+from core import PipelineContext, batcher, StageOutput
 
 class CVEMapper:
     def __init__(self, output_dir: Path):
@@ -23,17 +23,18 @@ class CVEMapper:
                 log(f"[cve_mapper] Failed to load {self.cve_db_path}: {e}", Colors.YELLOW)
         return {}
 
-    def run(self, data: List[Dict], context: PipelineContext, pb=None) -> List[Dict]:
+    def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """
         Process, enrich, and prioritize raw Nuclei findings.
         """
-        nuclei_findings = data
-        if not nuclei_findings:
-            return []
-
         pb.update(0, status="Initializing CVE Mapping & Exploit Intel...")
         enriched_findings = []
         
+        # Defensive extraction of findings
+        nuclei_findings = data if isinstance(data, list) else getattr(data, 'data', [])
+        if not nuclei_findings:
+            return StageOutput(data=[], stats={"mapped": 0})
+
         # Batch processing for consistency
         batches = list(batcher(nuclei_findings, size=500))
         pb.set_batch(0, len(batches))
@@ -86,7 +87,8 @@ class CVEMapper:
         self._write_prioritized_vulns(prioritized)
         self._write_exploit_intel(clusters)
 
-        return prioritized
+        return StageOutput(data=prioritized, stats={"mapped_findings": len(prioritized)})
+
 
 
     def _extract_cves(self, finding: Dict) -> Set[str]:
