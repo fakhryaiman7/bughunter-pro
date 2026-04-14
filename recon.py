@@ -4,6 +4,7 @@ recon.py — Recon Engine  v2.0 (Refactored for Stability & Observability)
 
 import json
 import re
+import inspect
 import threading
 import socket
 import ssl
