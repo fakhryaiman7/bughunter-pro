@@ -6,11 +6,14 @@ from typing import List, Dict, Any, Set, Tuple
 
 from utils import log, Colors, save_json, load_json
 
-from core import PipelineContext, batcher, StageOutput
+from core import PipelineContext, batcher, StageOutput, PipelineConfig, DependencyGuard
 
 class CVEMapper:
-    def __init__(self, output_dir: Path):
-        self.output_dir = output_dir
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self.output_dir = context.output
         self.cve_db = {}
 
     def _load_cve_db(self, context: PipelineContext) -> Dict[str, Any]:

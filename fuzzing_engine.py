@@ -10,11 +10,14 @@ from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils import log, Colors, run_cmd, tool_available
-from core import PipelineContext, batcher, StageOutput
+from core import PipelineContext, batcher, StageOutput, PipelineConfig, DependencyGuard
 
 class FuzzingEngine:
-    def __init__(self, output: Path):
-        self.output = output
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self.output = context.output
         self.results: List[Dict] = []
         self._lock = threading.Lock()
 

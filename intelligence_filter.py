@@ -8,12 +8,15 @@ from pathlib import Path
 
 from utils import log, Colors
 
-from core import PipelineContext, batcher, StageOutput
+from core import PipelineContext, batcher, StageOutput, PipelineConfig, DependencyGuard
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class FilterPipeline:
-    def __init__(self, output_dir: Path):
-        self.output_dir = output_dir
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self.output_dir = context.output
 
     def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """

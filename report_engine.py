@@ -288,14 +288,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+from core import PipelineContext, PipelineConfig, DependencyGuard
+
 # ─────────────────────────────────────────────
 #  ReportEngine
 # ─────────────────────────────────────────────
 
 class ReportEngine:
-    def __init__(self, output: Path, target: str):
-        self.output = output
-        self.target = target
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self.output = context.output
+        self.target = context.target
 
     def generate(self, findings: List[Dict], targets: List[Dict],
                  pattern_hits: List[Dict]) -> str:

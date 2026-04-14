@@ -12,11 +12,16 @@ import requests
 from utils import log, Colors
 
 
+from core import PipelineContext, PipelineConfig, DependencyGuard
+
 class Notifier:
-    def __init__(self, args):
-        self.slack_url   = getattr(args, "notify_slack",   None)
-        self.discord_url = getattr(args, "notify_discord", None)
-        self.target      = getattr(args, "target", "unknown")
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self.slack_url = getattr(config, "notify_slack", None)
+        self.discord_url = getattr(config, "notify_discord", None)
+        self.target = context.target
 
     def send_summary(self, targets: List[Dict], exploits: List[Dict]):
         if not self.slack_url and not self.discord_url:

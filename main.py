@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 from utils import banner, log, Colors, ensure_dirs, validate_domain, ProgressBar
-from core import PipelineContext, validate_module, PipelineConfig, DependencyGuard
+from core import PipelineContext, validate_module, PipelineConfig, DependencyGuard, Bootstrap
 from recon import ReconEngine
 from intelligence_filter import FilterPipeline
 from cve_mapper import CVEMapper
@@ -19,39 +19,27 @@ from report_engine import ReportEngine
 
 class BugHunterPro:
     def __init__(self, args: argparse.Namespace):
+        # 1. Initialize System via Bootstrap
+        boot = Bootstrap(args).initialize()
         self.args = args
-        self.output = Path(args.output)
+        self.config = boot.config
+        self.deps = boot.deps
+        self.context = boot.context
+        self.output = self.context.output
         ensure_dirs(self.output)
 
-        # 1. Initialize Config & Dependencies (Centralized)
-        self.config = PipelineConfig(args)
-        self.deps   = DependencyGuard()
-        
-        # 2. Pre-flight Check (Fail Fast)
+        # 2. Register Modules
+        reg = boot.registry
+        self.recon     = reg.register("recon", ReconEngine)
+        self.filter    = reg.register("filter", FilterPipeline)
+        self.cve       = reg.register("cve", CVEMapper)
+        self.fuzzer    = reg.register("fuzzer", FuzzingEngine)
+        self.exploiter = reg.register("exploiter", ExploitEngine)
+        self.notifier  = reg.register("notifier", Notifier, validate=False)
+        self.reporter  = reg.register("reporter", ReportEngine, validate=False)
+
+        # 3. Environment Validation (Fail Fast)
         self._preflight_check()
-
-        # 3. Initialize Context
-        scope = self._load_scope(args.scope) if args.scope else [args.target]
-        self.context = PipelineContext(args.target, scope, self.output, self.config, self.deps)
-        
-        # 4. Initialize Engines
-        self.recon = ReconEngine(self.output)
-        self.filter = FilterPipeline(self.output)
-        self.cve = CVEMapper(self.output)
-        self.fuzzer = FuzzingEngine(self.output)
-        self.exploiter = ExploitEngine(self.output)
-        self.notifier = Notifier(args)
-        self.reporter = ReportEngine(self.output, args.target)
-
-        # 5. Validate Module Contracts
-        self._validate_contracts()
-
-    def _load_scope(self, scope_file: str) -> list:
-        try:
-            with open(scope_file) as f:
-                return [l.strip() for l in f if l.strip() and not l.startswith("#")]
-        except Exception:
-            return []
 
     def _preflight_check(self):
         """Validates environment and critical dependencies."""
@@ -61,12 +49,6 @@ class BugHunterPro:
         if missing:
             log(f"[!] Warning: Missing critical tools: {', '.join(missing)}", Colors.YELLOW)
             log("[!] Some stages may be skipped or use slower fallbacks.", Colors.YELLOW)
-
-    def _validate_contracts(self):
-        """Strict validation of module signatures."""
-        modules = [self.recon, self.filter, self.cve, self.fuzzer, self.exploiter]
-        for mod in modules:
-            validate_module(mod)
 
     def _get_pb(self, stage: int, name: str, tasks: int):
         return ProgressBar(stage, name, tasks)

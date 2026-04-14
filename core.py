@@ -140,16 +140,13 @@ class PipelineContext:
     Centralized state container for the BugHunter Pro pipeline.
     Encapsulates target scope, configurations, and shared resources.
     """
-    def __init__(self, target: str, scope: List[str], output: Path, args: argparse.Namespace):
+    def __init__(self, target: str, scope: List[str], output: Path, config: PipelineConfig, deps: DependencyGuard):
         self.target = target
         self.scope = scope
         self.output = output
-        self.args = args
+        self.config = config
+        self.deps = deps
         self.metadata = {}
-        
-        # New Architecture Layers
-        self.config = PipelineConfig(args)
-        self.deps = DependencyGuard(self.config)
         
         # Shared session for connection pooling
         self.session = requests.Session()
@@ -232,7 +229,7 @@ def batcher(data: Any, size: int = 500) -> Generator[List[Any], None, None]:
 def validate_module(module_obj: Any):
     """
     Strict validation of module contracts.
-    Enforces run(data, context, pb) signature and nomenclature.
+    Enforces run(data, context, pb) signature.
     """
     if not hasattr(module_obj, "run"):
         raise AttributeError(f"Module {module_obj.__class__.__name__} is missing required 'run' method.")
@@ -240,20 +237,76 @@ def validate_module(module_obj: Any):
     sig = inspect.signature(module_obj.run)
     params = list(sig.parameters.keys())
     
-    # Check for (self, data, context, pb)
-    if len(params) < 3: # allow self to be implicit or explicit depending on usage
-        raise TypeError(f"Module {module_obj.__class__.__name__}.run() signature is too short. Expected (data, context, pb).")
-    
-    # If it's a bound method, params[0] is data. If it's unbound, params[1] is data.
-    # We'll just check if 'data', 'context', and 'pb' are present.
     required = {'data', 'context', 'pb'}
     missing = required - set(params)
     if missing:
         raise TypeError(f"Module {module_obj.__class__.__name__}.run() is missing required parameters: {missing}")
-    
-    if params[0] == 'self':
-        if params[1] != 'data' or params[2] != 'context':
-            log(f"[!] Warning: Module {module_obj.__class__.__name__} uses non-standard parameter ordering/naming.", Colors.YELLOW)
-    elif params[0] != 'data' or params[1] != 'context':
-             log(f"[!] Warning: Module {module_obj.__class__.__name__} uses non-standard parameter ordering/naming.", Colors.YELLOW)
+
+
+class ModuleRegistry:
+    """
+    Centralized registry for pipeline modules.
+    Ensures safe instantiation with injected dependencies.
+    """
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self._modules: Dict[str, Any] = {}
+
+    def register(self, name: str, module_class: Any, validate: bool = True, **kwargs):
+        """Instantiates and registers a module with standard dependencies."""
+        try:
+            instance = module_class(self.config, self.context, self.deps, **kwargs)
+            if validate:
+                validate_module(instance)
+            self._modules[name] = instance
+            return instance
+        except Exception as e:
+            log(f"[FATAL] Registration failed for module '{name}': {e}", Colors.RED)
+            raise e
+
+    def get(self, name: str) -> Any:
+        return self._modules.get(name)
+
+
+class Bootstrap:
+    """
+    The Foundation Layer (Bootstrap Pattern).
+    Responsible for the entire system initialization and pre-flight validation.
+    """
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.config = None
+        self.deps = None
+        self.context = None
+        self.registry = None
+
+    def initialize(self) -> 'Bootstrap':
+        log("[*] Bootstrapping BugHunter Pro v2.0 Architecture...", Colors.CYAN)
+        
+        # 1. Core Objects
+        self.config = PipelineConfig(self.args)
+        self.deps = DependencyGuard(self.config)
+        
+        # 2. Scope & Target
+        scope = self._load_scope()
+        output = Path(self.args.output)
+        
+        # 3. Context Injection (Dependency Injection)
+        self.context = PipelineContext(self.args.target, scope, output, self.config, self.deps)
+        
+        # 4. Registry Setup
+        self.registry = ModuleRegistry(self.config, self.context, self.deps)
+        
+        return self
+
+    def _load_scope(self) -> List[str]:
+        if not self.args.scope:
+            return [self.args.target]
+        try:
+            with open(self.args.scope) as f:
+                return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+        except Exception:
+            return [self.args.target]
 

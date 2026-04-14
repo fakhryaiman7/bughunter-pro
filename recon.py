@@ -14,15 +14,18 @@ from typing import List, Dict, Set, Optional, Any
 
 import requests
 import urllib3
-from core import PipelineContext, retry, batcher, validate_module, StageOutput
+from core import PipelineContext, retry, batcher, validate_module, StageOutput, PipelineConfig, DependencyGuard
 from utils import log, Colors, run_cmd, tool_available, save_json, load_json
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class ReconEngine:
-    def __init__(self, output: Path):
-        self.output = output
-        self._prev_assets_file = output / "knowledge" / "prev_assets.json"
+    def __init__(self, config: PipelineConfig, context: PipelineContext, deps: DependencyGuard):
+        self.config = config
+        self.context = context
+        self.deps = deps
+        self.output = context.output
+        self._prev_assets_file = self.output / "knowledge" / "prev_assets.json"
 
     def run(self, data: Any, context: PipelineContext, pb=None) -> StageOutput:
         """Standard entry point."""
