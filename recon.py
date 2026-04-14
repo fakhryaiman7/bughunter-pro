@@ -48,15 +48,23 @@ class ReconEngine:
 
         for domain in self.scope:
             log(f"[recon] Discovering subdomains for {domain}", Colors.CYAN)
-            all_subs.update(self._subfinder(domain))
-            all_subs.update(self._amass(domain))
-            all_subs.update(self._crtsh(domain))
-            all_subs.update(self._assetfinder(domain))
-            all_subs.update(self._dnsx_bruteforce(domain))
-            all_subs.update(self._wayback_subdomains(domain))
-            all_subs.update(self._cert_sans(domain))
+            passive_subs: Set[str] = set()
+            passive_subs.update(self._subfinder(domain))
+            passive_subs.update(self._amass(domain))
+            passive_subs.update(self._crtsh(domain))
+            passive_subs.update(self._assetfinder(domain))
+            passive_subs.update(self._wayback_subdomains(domain))
+            passive_subs.update(self._cert_sans(domain))
             if self.shodan_key:
-                all_subs.update(self._shodan_subdomains(domain))
+                passive_subs.update(self._shodan_subdomains(domain))
+                
+            all_subs.update(passive_subs)
+            
+            # Threshold controller
+            if len(passive_subs) > 5000:
+                log(f"[recon] THRESHOLD EXCEEDED (>5000 subdomains for {domain}). Stopping brute-force, switching to passive-only mode.", Colors.YELLOW)
+            else:
+                all_subs.update(self._dnsx_bruteforce(domain))
 
         # Clean: remove wildcards, normalize
         subs = sorted({s.strip().lstrip("*.").lower()
@@ -95,25 +103,30 @@ class ReconEngine:
 
     def _crtsh(self, domain: str) -> List[str]:
         """Passive: certificate transparency logs."""
-        try:
-            resp = requests.get(
-                f"https://crt.sh/?q=%.{domain}&output=json",
-                timeout=20
-            )
-            if resp.status_code != 200:
-                return []
-            data = resp.json()
-            subs: Set[str] = set()
-            for entry in data:
-                name = entry.get("name_value", "")
-                for sub in name.split("\n"):
-                    sub = sub.strip().lstrip("*.")
-                    if sub.endswith(domain):
-                        subs.add(sub)
-            return list(subs)
-        except Exception as e:
-            log(f"[recon] crt.sh error: {e}", Colors.YELLOW)
-            return []
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(
+                    f"https://crt.sh/?q=%.{domain}&output=json",
+                    timeout=20
+                )
+                if resp.status_code != 200:
+                    time.sleep(2 ** attempt)
+                    continue
+                data = resp.json()
+                subs: Set[str] = set()
+                for entry in data:
+                    name = entry.get("name_value", "")
+                    for sub in name.split("\n"):
+                        sub = sub.strip().lstrip("*.")
+                        if sub.endswith(domain):
+                            subs.add(sub)
+                return list(subs)
+            except Exception as e:
+                log(f"[recon] crt.sh error on attempt {attempt + 1}: {e}", Colors.YELLOW)
+                time.sleep(2 ** attempt)
+        return []
 
     def _dnsx_bruteforce(self, domain: str) -> List[str]:
         """DNS bruteforce with dnsx — discovers subdomains not in CT logs."""
@@ -147,26 +160,31 @@ class ReconEngine:
 
     def _wayback_subdomains(self, domain: str) -> List[str]:
         """Extract subdomains from Wayback Machine CDX API."""
-        try:
-            url = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey&limit=1000"
-            resp = requests.get(url, timeout=20)
-            if resp.status_code != 200:
-                return []
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                url = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=text&fl=original&collapse=urlkey&limit=1000"
+                resp = requests.get(url, timeout=20)
+                if resp.status_code != 200:
+                    time.sleep(2 ** attempt)
+                    continue
 
-            subs = set()
-            for line in resp.text.splitlines():
-                # Extract domain from URL
-                match = re.match(r"https?://([^/]+)", line)
-                if match:
-                    sub = match.group(1).split(":")[0]
-                    if sub.endswith(domain):
-                        subs.add(sub)
+                subs = set()
+                for line in resp.text.splitlines():
+                    # Extract domain from URL
+                    match = re.match(r"https?://([^/]+)", line)
+                    if match:
+                        sub = match.group(1).split(":")[0]
+                        if sub.endswith(domain):
+                            subs.add(sub)
 
-            log(f"[recon] Wayback found {len(subs)} subdomains for {domain}", Colors.GREEN)
-            return list(subs)
-        except Exception as e:
-            log(f"[recon] Wayback error: {e}", Colors.YELLOW)
-            return []
+                log(f"[recon] Wayback found {len(subs)} subdomains for {domain}", Colors.GREEN)
+                return list(subs)
+            except Exception as e:
+                log(f"[recon] Wayback error on attempt {attempt + 1}: {e}", Colors.YELLOW)
+                time.sleep(2 ** attempt)
+        return []
 
     def _cert_sans(self, domain: str) -> List[str]:
         """Extract SANs from the domain's TLS certificate."""
@@ -260,12 +278,13 @@ class ReconEngine:
     # ══════════════════════════════════════════
     #  3. Alive Check
     # ══════════════════════════════════════════
-    def alive_check(self, subdomains: List[str]) -> List[str]:
+    def alive_check(self, subdomains: List[str], pb=None) -> List[str]:
         if tool_available("httpx"):
-            return self._httpx_check(subdomains)
-        return self._fallback_alive_check(subdomains)
+            return self._httpx_check(subdomains, pb=pb)
+        return self._fallback_alive_check(subdomains, pb=pb)
 
-    def _httpx_check(self, subdomains: List[str]) -> List[str]:
+    def _httpx_check(self, subdomains: List[str], pb=None) -> List[str]:
+        if pb: pb.update(0, status="Starting httpx scan...")
         hosts_file = self.output / "subdomains.txt"
         out_file   = self.output / "alive.txt"
 
@@ -277,6 +296,8 @@ class ReconEngine:
             "-follow-redirects",
         ], timeout=300)
 
+        if pb: pb.update(len(subdomains), status="httpx scan completed")
+
         alive = []
         if out_file.exists():
             with open(out_file) as f:
@@ -286,7 +307,8 @@ class ReconEngine:
                         alive.append(url)
         return alive
 
-    def _fallback_alive_check(self, subdomains: List[str]) -> List[str]:
+    def _fallback_alive_check(self, subdomains: List[str], pb=None) -> List[str]:
+        if pb: pb.update(0, status="Using fallback HTTP probe...")
         log("[recon] httpx not found — using fallback HTTP probe", Colors.YELLOW)
         alive = []
         lock = threading.Lock()
@@ -304,7 +326,9 @@ class ReconEngine:
                     pass
 
         with ThreadPoolExecutor(max_workers=30) as ex:
-            list(ex.map(probe, subdomains))
+            futures = [ex.submit(probe, sub) for sub in subdomains]
+            for _ in as_completed(futures):
+                if pb: pb.update(1, status="Probing subdomains...")
 
         out = self.output / "alive.txt"
         with open(out, "w") as f:
@@ -314,7 +338,7 @@ class ReconEngine:
     # ══════════════════════════════════════════
     #  4. Port Scan (expanded)
     # ══════════════════════════════════════════
-    def port_scan(self, alive: List[str]) -> Dict[str, List[int]]:
+    def port_scan(self, alive: List[str], pb=None) -> Dict[str, List[int]]:
         if not tool_available("nmap"):
             log("[recon] nmap not found, skipping port scan", Colors.YELLOW)
             return {}
@@ -349,6 +373,7 @@ class ReconEngine:
             if found_ports:
                 port_data[domain] = found_ports
                 log(f"[recon] {domain} → open ports: {found_ports}", Colors.GREEN)
+            if pb: pb.update(1, status=f"Scanned {domain}")
 
         save_json(self.output / "port_scan.json", port_data)
         return port_data
@@ -422,16 +447,17 @@ class ReconEngine:
     # ══════════════════════════════════════════
     #  7. Technology Detection
     # ══════════════════════════════════════════
-    def detect_tech(self, alive: List[str]) -> Dict[str, List[str]]:
+    def detect_tech(self, alive: List[str], pb=None) -> Dict[str, List[str]]:
         if tool_available("whatweb"):
-            tech_map = self._whatweb(alive)
+            tech_map = self._whatweb(alive, pb=pb)
         else:
-            tech_map = self._header_tech_detect(alive)
+            tech_map = self._header_tech_detect(alive, pb=pb)
 
         save_json(self.output / "tech_map.json", tech_map)
         return tech_map
 
-    def _whatweb(self, alive: List[str]) -> Dict[str, List[str]]:
+    def _whatweb(self, alive: List[str], pb=None) -> Dict[str, List[str]]:
+        if pb: pb.update(0, status="Running WhatWeb tech detection...")
         tech_map: Dict[str, List[str]] = {}
         for url in alive:
             rc, out, err = run_cmd(
@@ -443,9 +469,11 @@ class ReconEngine:
                 tech_map[url] = plugins
             except Exception:
                 pass
+            if pb: pb.update(1, status=f"Analyzed {url}")
         return tech_map
 
-    def _header_tech_detect(self, alive: List[str]) -> Dict[str, List[str]]:
+    def _header_tech_detect(self, alive: List[str], pb=None) -> Dict[str, List[str]]:
+        if pb: pb.update(0, status="Running header-based tech detection...")
         """Detect tech from response headers & body."""
         SIGNATURES = {
             "WordPress":  [r"wp-content", r"wp-includes", r"WordPress"],
@@ -495,14 +523,16 @@ class ReconEngine:
                 tech_map[url] = list(set(techs))
 
         with ThreadPoolExecutor(max_workers=20) as ex:
-            list(ex.map(detect, alive))
+            futures = [ex.submit(detect, url) for url in alive]
+            for _ in as_completed(futures):
+                if pb: pb.update(1, status="Analyzing headers...")
 
         return tech_map
 
     # ══════════════════════════════════════════
     #  NEW v2.0: JS Endpoint Extraction
     # ══════════════════════════════════════════
-    def extract_js_endpoints(self, alive: List[str]) -> List[str]:
+    def extract_js_endpoints(self, alive: List[str], pb=None) -> List[str]:
         """Extract API endpoints hidden in JavaScript files."""
         endpoints: Set[str] = set()
 
@@ -518,8 +548,10 @@ class ReconEngine:
         JS_URLS_PATTERN = r'src=["\']([^"\']+\.js(?:\?[^"\']*)?)["\']'
 
         log(f"[recon] Extracting JS endpoints from {len(alive)} targets", Colors.CYAN)
+        if pb: pb.update(0, status="Starting JS endpoint extraction...")
 
         for base_url in alive[:20]:  # limit to 20 targets
+            if pb: pb.update(1, status=f"Analyzing JS in {base_url}")
             try:
                 r = requests.get(base_url, timeout=8, verify=False)
                 if not r:

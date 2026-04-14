@@ -100,7 +100,7 @@ class FuzzingEngine:
         self.results: List[Dict] = []
         self._lock = threading.Lock()
 
-    def run(self, targets: List[Dict[str, Any]], tech_map: Dict[str, List[str]]):
+    def run(self, targets: List[Dict[str, Any]], tech_map: Dict[str, List[str]], pb=None):
         if not tool_available("ffuf"):
             log("[fuzz] ffuf not found — install from https://github.com/ffuf/ffuf", Colors.YELLOW)
             self._write_results()
@@ -114,7 +114,7 @@ class FuzzingEngine:
 
         threads = []
         for target in targets:
-            t = threading.Thread(target=self._fuzz_target, args=(target, tech_map))
+            t = threading.Thread(target=self._fuzz_target, args=(target, tech_map, pb))
             t.daemon = True
             t.start()
             threads.append(t)
@@ -124,7 +124,7 @@ class FuzzingEngine:
 
         self._write_results()
 
-    def _fuzz_target(self, target: Dict, tech_map: Dict):
+    def _fuzz_target(self, target: Dict, tech_map: Dict, pb=None):
         url   = target["url"]
         tags  = target.get("tags", [])
         tech  = tech_map.get(url, [])
@@ -178,6 +178,7 @@ class FuzzingEngine:
 
         # Also fuzz parameters
         self._param_fuzz(url)
+        if pb: pb.update(1, status=f"Completed fuzzing {url}")
 
     def _param_fuzz(self, url: str):
         """Fuzz common parameters on discovered endpoints."""
