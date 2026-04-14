@@ -167,13 +167,24 @@ class IntelligenceEngine:
         status_map: Dict[str, int] = None,
     ) -> List[Dict[str, Any]]:
 
-        # Build nuclei lookup
+        # Build nuclei lookup — handle nuclei v2/v3 JSON format differences
         nuclei_lookup: Dict[str, int] = {}
         for finding in nuclei_findings:
-            host = finding.get("host", "")
-            sev  = finding.get("info", {}).get("severity", "info").lower()
-            score = NUCLEI_SEVERITY.get(sev, 0)
-            nuclei_lookup[host] = max(nuclei_lookup.get(host, 0), score)
+            # nuclei v3 sometimes wraps findings in a list
+            if isinstance(finding, list):
+                items = finding
+            elif isinstance(finding, dict):
+                items = [finding]
+            else:
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                host = item.get("host", item.get("url", ""))
+                sev  = item.get("info", {}).get("severity", "info").lower()
+                score = NUCLEI_SEVERITY.get(sev, 0)
+                if host:
+                    nuclei_lookup[host] = max(nuclei_lookup.get(host, 0), score)
 
         scored: List[Dict[str, Any]] = []
 
