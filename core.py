@@ -161,6 +161,165 @@ class PipelineContext:
     def get_config(self, key: str, default: Any = None) -> Any:
         return getattr(self.config, key, default)
 
+    def fetch_baseline(self, domain: str) -> Optional[str]:
+        """Fetches and caches a baseline hash for a domain (404/catch-all detection)."""
+        if domain in getattr(self, "baseline_cache", {}):
+            return self.baseline_cache[domain]
+        
+        if not hasattr(self, "baseline_cache"):
+            self.baseline_cache = {}
+
+        try:
+            # Try a random path likely to be 404
+            random_path = f"https://{domain}/.well-known/security-check-{int(time.time())}"
+            r = self.session.get(random_path, timeout=10, verify=False)
+            h = hashlib.sha256(r.text.encode()).hexdigest()
+            self.baseline_cache[domain] = h
+            return h
+        except:
+            return None
+
+
+class Finding:
+    """Structured vulnerability finding with confidence scoring."""
+    def __init__(self, url: str, vuln_type: str, severity: str, confidence: int, proof: str, reason: str, recommendation: str):
+        self.url = url
+        self.vuln_type = vuln_type
+        self.severity = severity
+        self.confidence = confidence
+        self.proof = proof
+        self.reason = reason
+        self.recommendation = recommendation
+
+    def to_dict(self):
+        return self.__dict__
+
+
+class VulnerabilityValidator:
+    """High-precision validation engine to eliminate false positives."""
+    
+    @staticmethod
+    def validate(response: requests.Response, vuln_type: str, context: PipelineContext) -> Finding:
+        """
+        Validates a response and returns a Finding with confidence score.
+        Returns confidence=0 if rejected.
+        """
+        url = response.url
+        body = response.text
+        status = response.status_code
+        size = len(body)
+        
+        # 1. Strict Status Filter (MANDATORY)
+        if status not in (200, 201, 202):
+            return Finding(url, vuln_type, "LOW", 0, "", f"Invalid status code: {status}", "")
+
+        # 2. Size Filter (MANDATORY)
+        if size < 50:
+            return Finding(url, vuln_type, "LOW", 0, "", "Response too small (< 50 bytes)", "")
+
+        # 3. Baseline Hash Check (Catch-all detection)
+        domain = url.split("//")[-1].split("/")[0]
+        baseline_hash = context.fetch_baseline(domain)
+        current_hash = hashlib.sha256(body.encode()).hexdigest()
+        
+        if baseline_hash and current_hash == baseline_hash:
+            return Finding(url, vuln_type, "LOW", 0, "", "Identical to 404/baseline response", "")
+
+        # 4. Global Duplicate Filter
+        if not hasattr(context, "seen_hashes"):
+            context.seen_hashes = set()
+        
+        with getattr(context, "_hash_lock", threading.Lock()):
+            if not hasattr(context, "_hash_lock"):
+                context._hash_lock = threading.Lock()
+            if current_hash in context.seen_hashes:
+                # We only count it as a duplicate if we've seen this exact body elsewhere
+                # This often happens with "Software Error" or "Not Found" 200 OK pages
+                return Finding(url, vuln_type, "LOW", 0, "", "Duplicate response body detected elsewhere (possible FP)", "")
+            context.seen_hashes.add(current_hash)
+
+        confidence = 60 # Base confidence for 200 OK with decent size
+        reasons = ["Validated status 200 OK", f"Response size: {size} bytes"]
+
+        # 5. Entropy & Placeholder Check
+        if VulnerabilityValidator._is_placeholder(body):
+            return Finding(url, vuln_type, "LOW", 0, "", "Parking/Placeholder page detected via entropy/pattern check", "")
+
+        # 6. Advanced Content Validation
+        vuln_type_lower = vuln_type.lower()
+        if ".env" in vuln_type_lower or ".env" in url:
+            sigs = ["DB_PASSWORD", "APP_KEY", "AWS_ACCESS_KEY", "DATABASE_URL", "REDIS_URL", "MAIL_PASSWORD"]
+            matches = [s for s in sigs if s in body]
+            # Pattern check for KEY=VALUE
+            kv_pattern = re.search(r'^[A-Z0-9_]+=[^\s]+', body, re.M)
+            
+            if matches:
+                confidence += 30
+                reasons.append(f"Confirmed secrets found: {', '.join(matches)}")
+            if kv_pattern:
+                confidence += 10
+                reasons.append("Matched KEY=VALUE environment pattern")
+            
+            if not matches and not kv_pattern:
+                confidence -= 50
+                reasons.append("No common .env keys or patterns found")
+
+        elif "admin" in vuln_type_lower or "admin" in url.lower():
+            sigs = [
+                (r'type=["\']password["\']', "Password field"),
+                (r'<form', "Login form"),
+                (r'user(name|id)', "Username field"),
+                (r'sign[ \-]in', "Sign-in keyword"),
+                (r'log[ \-]in', "Log-in keyword")
+            ]
+            found_sigs = [desc for pat, desc in sigs if re.search(pat, body, re.I)]
+            
+            if len(found_sigs) >= 2:
+                confidence += 30
+                reasons.append(f"Confirmed UI elements: {', '.join(found_sigs)}")
+            elif len(found_sigs) == 1:
+                confidence += 10
+                reasons.append(f"Detected potential UI element: {found_sigs[0]}")
+            else:
+                confidence -= 30
+                reasons.append("Generic page - no login elements found")
+
+        # 7. Information Leakage (v2.0 addition)
+        if "phpinfo" in vuln_type_lower or "phpinfo" in body:
+            if "PHP Version" in body and "Configuration" in body:
+                confidence = 100
+                reasons.append("Confirmed phpinfo() exposure")
+
+        confidence = max(0, min(100, confidence))
+        
+        return Finding(
+            url=url,
+            vuln_type=vuln_type,
+            severity="HIGH", # Will be adjusted by caller
+            confidence=confidence,
+            proof=body[:200].replace("\n", " "),
+            reason=" | ".join(reasons),
+            recommendation="Review the exposed content and restrict access immediately."
+        )
+
+    @staticmethod
+    def _is_placeholder(body: str) -> bool:
+        """Heuristic check for parking pages and placeholders."""
+        body_lower = body.lower()
+        patterns = [
+            "domain is for sale", "parking page", "under construction",
+            "coming soon", "server is running", "default page",
+            "powered by cpanel", "no input file specified"
+        ]
+        if any(p in body_lower for p in patterns):
+            return True
+            
+        # Very low entropy check (basic): long repeated characters or very common words
+        if len(set(body_lower)) < 15 and len(body) > 500: # Very few unique chars in a large body
+            return True
+            
+        return False
+
 
 
 class StageOutput:

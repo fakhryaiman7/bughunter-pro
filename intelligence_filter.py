@@ -184,6 +184,44 @@ class FilterPipeline:
             return True
         return False
 
+    def filter_vulnerabilities(self, findings: List[Dict]) -> List[Dict]:
+        """
+        Final precision filter:
+        1. Removes findings below the confidence threshold (60%).
+        2. Clusters similar findings to reduce noise.
+        """
+        if not findings:
+            return []
+
+        # 1. Confidence Filter
+        high_precision_findings = [f for f in findings if f.get("confidence", 0) >= 60]
+        
+        # 2. Clustering Logic
+        # Group by (type, domain)
+        clusters = {}
+        for f in high_precision_findings:
+            domain = extract_domain(f["url"])
+            key = (f["type"], domain)
+            if key not in clusters:
+                clusters[key] = []
+            clusters[key].append(f)
+            
+        final_findings = []
+        for (vtype, domain), cluster in clusters.items():
+            # If we have multiple similar findings on the same domain, picks the best one or groups them
+            if len(cluster) > 3:
+                # Group them - keep the one with highest confidence
+                best_finding = max(cluster, key=lambda x: x["confidence"])
+                best_finding["detail"] = f"{best_finding['detail']} (Cluster: +{len(cluster)-1} similar findings on this asset)"
+                final_findings.append(best_finding)
+            else:
+                final_findings.extend(cluster)
+        
+        log(f"[filter] Low-confidence findings filtered: {len(findings) - len(high_precision_findings)} removed", Colors.YELLOW)
+        log(f"[filter] Precise findings remaining: {len(final_findings)}", Colors.GREEN)
+        
+        return sorted(final_findings, key=lambda x: x.get("confidence", 0), reverse=True)
+
     def generate_report(self, stats: Dict, ranked_targets: List[Dict]):
         path = self.output_dir / "filter_report.txt"
         with open(path, "w", encoding="utf-8") as f:

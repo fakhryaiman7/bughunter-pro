@@ -143,22 +143,29 @@ class BugHunterPro:
                 exploit_results = exploit_out.data
                 pb.complete(f"Exploit audit found {exploit_out.stats.get('vulnerabilities', 0)} actionable items")
 
-            # ── 13. Final Report Generation ───────
+            # ── 13. Intelligence Filtering & Reporting ────
             pb = self._get_pb(13, "Intelligence Reporting", 1)
-            report_path = self.reporter.generate(exploit_results, ranked, [])
-            self.notifier.send_summary(ranked, exploit_results)
+            
+            # Combine all findings
+            all_findings = exploit_results + fuzz_results
+            
+            # Apply precision filter & clustering
+            final_findings = self.filter.filter_vulnerabilities(all_findings)
+            
+            report_path = self.reporter.generate(final_findings, ranked, [])
+            self.notifier.send_summary(ranked, final_findings)
             pb.complete(f"All updates pushed. Report: {report_path}")
             
             # ── 14. High-Impact Summary ──────────
             print("\n" + "═"*60)
             log("   CRITICAL INTELLIGENCE SUMMARY", Colors.CYAN)
             print("═"*60)
-            if exploit_results:
-                log(f"[!] Actionable Vulnerabilities: {len(exploit_results)}", Colors.YELLOW)
-                for res in exploit_results[:5]:
-                    log(f"    ↳ {res.get('severity', 'INFO')}: {res.get('name')} -> {res.get('url')}", Colors.WHITE)
+            if final_findings:
+                log(f"[!] Actionable Vulnerabilities: {len(final_findings)}", Colors.YELLOW)
+                for res in final_findings[:5]:
+                    log(f"    ↳ [CONF: {res.get('confidence', 0)}%] {res.get('severity', 'INFO')}: {res.get('type')} -> {res.get('url')}", Colors.WHITE)
             else:
-                log("[*] No immediate critical exploits found.", Colors.GREEN)
+                log("[*] No immediate high-confidence exploits found.", Colors.GREEN)
             
             log(f"\n[*] Total Assets Scanned: {len(ranked)}", Colors.WHITE)
             log(f"[*] Workspace Directory: {self.output}", Colors.WHITE)
