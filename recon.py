@@ -55,7 +55,13 @@ class ReconEngine:
             
             for source_func, name in sources:
                 try:
-                    res = source_func(domain)
+                    # Check if function accepts 'context'
+                    sig = inspect.signature(source_func)
+                    if "context" in sig.parameters:
+                        res = source_func(domain, context)
+                    else:
+                        res = source_func(domain)
+                    
                     all_subs.update(res)
                     pb.update(1, status=f"Found {len(res)} from {name}")
                 except Exception as e:

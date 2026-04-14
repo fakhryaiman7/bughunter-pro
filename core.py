@@ -18,9 +18,13 @@ class PipelineConfig:
     def __init__(self, args: argparse.Namespace):
         self.threads = getattr(args, "threads", 10)
         self.timeout = 30 # Default timeout for network operations
+        self.shodan_key = getattr(args, "shodan_key", "")
+        self.seclists_path = getattr(args, "seclists_path", "")
+        self.notify_slack = getattr(args, "notify_slack", None)
+        self.discord_webhook = getattr(args, "notify_discord", None)
         
         # Wordlist resolution paths
-        self.seclists_base = self._detect_seclists(getattr(args, "seclists_path", ""))
+        self.seclists_base = self._detect_seclists(self.seclists_path)
         self.wordlists_dir = Path("wordlists")
         self.wordlists_dir.mkdir(exist_ok=True)
 
@@ -155,8 +159,7 @@ class PipelineContext:
         })
 
     def get_config(self, key: str, default: Any = None) -> Any:
-        # Backward compatibility for existing modules
-        return getattr(self.args, key, getattr(self.config, key, default))
+        return getattr(self.config, key, default)
 
 
 
