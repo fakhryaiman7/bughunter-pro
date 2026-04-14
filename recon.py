@@ -24,6 +24,10 @@ class ReconEngine:
         self.output = output
         self._prev_assets_file = output / "knowledge" / "prev_assets.json"
 
+    def run(self, data: Any, context: PipelineContext, pb=None):
+        """Standard entry point (satisfies module contract)."""
+        return self.run_discovery(data, context, pb)
+
     # ══════════════════════════════════════════
     #  1. Subdomain Discovery
     # ══════════════════════════════════════════
