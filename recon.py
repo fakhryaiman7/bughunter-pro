@@ -78,7 +78,14 @@ class ReconEngine:
         current_subs = data
         pb.update(0, status="Comparing assets with previous state...")
         prev_data = load_json(self._prev_assets_file, default={"subdomains": []})
-        prev_subs = set(prev_data.get("subdomains", []))
+        if isinstance(prev_data, list):
+            prev_subs = set(prev_data)
+        else:
+            try:
+                prev_subs = set(prev_data.get("subdomains", []))
+            except (AttributeError, TypeError):
+                prev_subs = set()
+
         
         new_subs = [s for s in current_subs if s not in prev_subs]
         removed_subs = [s for s in prev_subs if s not in current_subs]
