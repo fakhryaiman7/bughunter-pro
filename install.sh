@@ -148,7 +148,7 @@ ok "Python packages installed"
 # ── 4. APT Packages ─────────────────────────────────────────
 step "Installing APT Packages"
 
-# Helper: install apt package with visible progress
+# Helper: install apt package — direct output (no pipe hang)
 apt_install() {
     local pkg=$1
     local desc=${2:-$pkg}
@@ -156,75 +156,36 @@ apt_install() {
         ok "$desc already installed"
         return
     fi
-    echo -e "  ${INFO} Installing ${BOLD}${desc}${RESET}:"
-    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
-    # Run apt with progress — no -qq, pipe through stdbuf to show in real time
-    $SUDO apt-get install -y "$pkg" 2>&1 | \
-        grep --line-buffered -E '(Get:|Unpacking|Setting up|Preparing|Processing|[0-9]+%)' | \
-        while IFS= read -r line; do
-            # Color different lines
-            if echo "$line" | grep -q 'Get:'; then
-                # Show package name and size from the Get line
-                pkginfo=$(echo "$line" | sed 's/Get:[0-9]* https\?:\/\/[^ ]* //' | sed 's/ [^ ]*$//')
-                size=$(echo "$line" | grep -oE '[0-9.]+ [kMG]B' | tail -1)
-                echo -e "    ${CYAN}↓ Downloading:${RESET} $pkginfo ${YELLOW}[$size]${RESET}"
-            elif echo "$line" | grep -q 'Unpacking'; then
-                name=$(echo "$line" | awk '{print $2}')
-                echo -e "    ${MAGENTA}📦 Unpacking:${RESET} $name"
-            elif echo "$line" | grep -q 'Setting up'; then
-                name=$(echo "$line" | awk '{print $3}')
-                echo -e "    ${GREEN}⚙  Setting up:${RESET} $name"
-            fi
-        done
-    if has "$pkg"; then
-        echo -e "  ${GREEN}[✓] $desc installed successfully${RESET}"
+    echo -e "  ${INFO} Installing ${BOLD}${desc}${RESET}..."
+    export DEBIAN_FRONTEND=noninteractive
+    if $SUDO apt-get install -y "$pkg" ; then
+        ok "$desc installed successfully"
     else
-        echo -e "  ${RED}[✗] $desc installation failed (non-critical)${RESET}"
+        warn "$desc installation failed (non-critical — some features may be skipped)"
     fi
-    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
 }
 
 echo -e "  ${INFO} Updating package lists..."
-$SUDO apt-get update 2>&1 | grep --line-buffered -E '(Get:|Hit:|Ign:|Reading|Building|Fetched)' | \
-    while IFS= read -r line; do
-        if echo "$line" | grep -q 'Get:'; then
-            src=$(echo "$line" | awk '{print $3}' | sed 's/https\?:\/\///' | cut -d/ -f1)
-            echo -e "    ${CYAN}↻ Fetching:${RESET} $src"
-        elif echo "$line" | grep -q 'Fetched'; then
-            echo -e "    ${GREEN}✓ $line${RESET}"
-        fi
-    done
+export DEBIAN_FRONTEND=noninteractive
+$SUDO apt-get update
 ok "Package lists updated"
 
-apt_install "nmap"     "Nmap (port scanner)"
-apt_install "amass"    "Amass (subdomain enumeration)"
-apt_install "whatweb"  "WhatWeb (tech detection)"
+apt_install "nmap"    "Nmap (port scanner)"
+apt_install "amass"   "Amass (subdomain enumeration)"
+apt_install "whatweb" "WhatWeb (tech detection)"
 
-# SecLists — show size warning
+# SecLists
 if [[ -d "/usr/share/seclists" ]] || [[ -d "/usr/share/wordlists/seclists" ]]; then
     ok "SecLists already installed"
 else
-    echo -e "  ${INFO} Installing ${BOLD}SecLists${RESET} (wordlists — ~450MB, may take a while):"
-    echo -e "  ${YELLOW}  ⏳ Please wait, downloading large wordlist collection...${RESET}"
-    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
-    $SUDO apt-get install -y seclists 2>&1 | \
-        grep --line-buffered -E '(Get:|Unpacking|Setting up|[0-9]+%)' | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -q 'Get:'; then
-                size=$(echo "$line" | grep -oE '[0-9.]+ [kMG]B' | tail -1)
-                echo -e "    ${CYAN}↓ Downloading SecLists${RESET} ${YELLOW}[$size]${RESET}"
-            elif echo "$line" | grep -q 'Unpacking'; then
-                echo -e "    ${MAGENTA}📦 Unpacking wordlists...${RESET}"
-            elif echo "$line" | grep -q 'Setting up'; then
-                echo -e "    ${GREEN}⚙  Setting up SecLists...${RESET}"
-            fi
-        done
-    if [[ -d "/usr/share/seclists" ]]; then
-        echo -e "  ${GREEN}[✓] SecLists installed${RESET}"
+    echo -e "  ${INFO} Installing ${BOLD}SecLists${RESET} (~450MB — this may take several minutes)..."
+    echo -e "  ${YELLOW}  ⏳ Please wait...${RESET}"
+    export DEBIAN_FRONTEND=noninteractive
+    if $SUDO apt-get install -y seclists ; then
+        ok "SecLists installed"
     else
-        echo -e "  ${YELLOW}[!] SecLists skipped — will use built-in wordlists${RESET}"
+        warn "SecLists skipped — will use built-in minimal wordlists"
     fi
-    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
 fi
 
 # ── 5. Go Installation ───────────────────────────────────────
