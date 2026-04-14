@@ -70,14 +70,23 @@ has() { command -v "$1" &>/dev/null; }
 install_go_tool() {
     local name=$1
     local pkg=$2
+    local desc=${3:-$name}
     if has "$name"; then
-        ok "$name already installed"
+        ok "$desc already installed"
     else
-        echo -ne "  ${INFO} Installing ${BOLD}$name${RESET}..."
-        if go install -v "$pkg" &>/dev/null 2>&1; then
-            echo -e " ${GREEN}done${RESET}"
+        echo -e "  ${INFO} Installing ${BOLD}${desc}${RESET} (Go tool)..."
+        # Show go output filtered to meaningful lines
+        go install -v "$pkg" 2>&1 | \
+            grep --line-buffered -E '(downloading|go: downloading|Downloading|fetching)' | \
+            while IFS= read -r line; do
+                mod=$(echo "$line" | awk '{print $3}' 2>/dev/null || echo "$line")
+                ver=$(echo "$line" | awk '{print $4}' 2>/dev/null || echo "")
+                echo -e "    ${CYAN}↓${RESET} $mod ${YELLOW}$ver${RESET}"
+            done
+        if has "$name"; then
+            echo -e "  ${GREEN}[✓] $desc installed${RESET}"
         else
-            echo -e " ${RED}failed (non-critical)${RESET}"
+            echo -e "  ${RED}[✗] $desc failed (non-critical)${RESET}"
         fi
     fi
 }
@@ -130,41 +139,92 @@ ok "Virtual environment activated"
 
 # ── 3. Python Dependencies ───────────────────────────────────
 step "Installing Python Dependencies"
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
-ok "Python packages installed (requests, urllib3, colorama, dnspython)"
+echo -e "  ${INFO} Upgrading pip..."
+pip install --upgrade pip
+echo -e "  ${INFO} Installing packages from requirements.txt..."
+pip install -r requirements.txt
+ok "Python packages installed"
 
 # ── 4. APT Packages ─────────────────────────────────────────
 step "Installing APT Packages"
 
-APT_TOOLS=("nmap" "amass" "whatweb")
-$SUDO apt-get update -qq 2>/dev/null
-
-for pkg in "${APT_TOOLS[@]}"; do
+# Helper: install apt package with visible progress
+apt_install() {
+    local pkg=$1
+    local desc=${2:-$pkg}
     if has "$pkg"; then
-        ok "$pkg already installed"
-    else
-        echo -ne "  ${INFO} Installing ${BOLD}$pkg${RESET}..."
-        if $SUDO apt-get install -y "$pkg" -qq &>/dev/null 2>&1; then
-            echo -e " ${GREEN}done${RESET}"
-        else
-            echo -e " ${RED}failed (non-critical)${RESET}"
-        fi
+        ok "$desc already installed"
+        return
     fi
-done
+    echo -e "  ${INFO} Installing ${BOLD}${desc}${RESET}:"
+    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
+    # Run apt with progress — no -qq, pipe through stdbuf to show in real time
+    $SUDO apt-get install -y "$pkg" 2>&1 | \
+        grep --line-buffered -E '(Get:|Unpacking|Setting up|Preparing|Processing|[0-9]+%)' | \
+        while IFS= read -r line; do
+            # Color different lines
+            if echo "$line" | grep -q 'Get:'; then
+                # Show package name and size from the Get line
+                pkginfo=$(echo "$line" | sed 's/Get:[0-9]* https\?:\/\/[^ ]* //' | sed 's/ [^ ]*$//')
+                size=$(echo "$line" | grep -oE '[0-9.]+ [kMG]B' | tail -1)
+                echo -e "    ${CYAN}↓ Downloading:${RESET} $pkginfo ${YELLOW}[$size]${RESET}"
+            elif echo "$line" | grep -q 'Unpacking'; then
+                name=$(echo "$line" | awk '{print $2}')
+                echo -e "    ${MAGENTA}📦 Unpacking:${RESET} $name"
+            elif echo "$line" | grep -q 'Setting up'; then
+                name=$(echo "$line" | awk '{print $3}')
+                echo -e "    ${GREEN}⚙  Setting up:${RESET} $name"
+            fi
+        done
+    if has "$pkg"; then
+        echo -e "  ${GREEN}[✓] $desc installed successfully${RESET}"
+    else
+        echo -e "  ${RED}[✗] $desc installation failed (non-critical)${RESET}"
+    fi
+    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
+}
 
-# SecLists (wordlists)
-if [[ -d "/usr/share/seclists" ]]; then
-    ok "SecLists already installed"
-elif [[ -d "/usr/share/wordlists/seclists" ]]; then
+echo -e "  ${INFO} Updating package lists..."
+$SUDO apt-get update 2>&1 | grep --line-buffered -E '(Get:|Hit:|Ign:|Reading|Building|Fetched)' | \
+    while IFS= read -r line; do
+        if echo "$line" | grep -q 'Get:'; then
+            src=$(echo "$line" | awk '{print $3}' | sed 's/https\?:\/\///' | cut -d/ -f1)
+            echo -e "    ${CYAN}↻ Fetching:${RESET} $src"
+        elif echo "$line" | grep -q 'Fetched'; then
+            echo -e "    ${GREEN}✓ $line${RESET}"
+        fi
+    done
+ok "Package lists updated"
+
+apt_install "nmap"     "Nmap (port scanner)"
+apt_install "amass"    "Amass (subdomain enumeration)"
+apt_install "whatweb"  "WhatWeb (tech detection)"
+
+# SecLists — show size warning
+if [[ -d "/usr/share/seclists" ]] || [[ -d "/usr/share/wordlists/seclists" ]]; then
     ok "SecLists already installed"
 else
-    echo -ne "  ${INFO} Installing ${BOLD}SecLists${RESET} (may take a moment)..."
-    if $SUDO apt-get install -y seclists -qq &>/dev/null 2>&1; then
-        echo -e " ${GREEN}done${RESET}"
+    echo -e "  ${INFO} Installing ${BOLD}SecLists${RESET} (wordlists — ~450MB, may take a while):"
+    echo -e "  ${YELLOW}  ⏳ Please wait, downloading large wordlist collection...${RESET}"
+    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
+    $SUDO apt-get install -y seclists 2>&1 | \
+        grep --line-buffered -E '(Get:|Unpacking|Setting up|[0-9]+%)' | \
+        while IFS= read -r line; do
+            if echo "$line" | grep -q 'Get:'; then
+                size=$(echo "$line" | grep -oE '[0-9.]+ [kMG]B' | tail -1)
+                echo -e "    ${CYAN}↓ Downloading SecLists${RESET} ${YELLOW}[$size]${RESET}"
+            elif echo "$line" | grep -q 'Unpacking'; then
+                echo -e "    ${MAGENTA}📦 Unpacking wordlists...${RESET}"
+            elif echo "$line" | grep -q 'Setting up'; then
+                echo -e "    ${GREEN}⚙  Setting up SecLists...${RESET}"
+            fi
+        done
+    if [[ -d "/usr/share/seclists" ]]; then
+        echo -e "  ${GREEN}[✓] SecLists installed${RESET}"
     else
-        echo -e " ${YELLOW}skipped (will use built-in wordlists)${RESET}"
+        echo -e "  ${YELLOW}[!] SecLists skipped — will use built-in wordlists${RESET}"
     fi
+    echo -e "  ${CYAN}─────────────────────────────────────────${RESET}"
 fi
 
 # ── 5. Go Installation ───────────────────────────────────────
@@ -179,9 +239,8 @@ else
     GO_PKG="go${GO_VER}.${GO_ARCH}.tar.gz"
     GO_URL="https://go.dev/dl/${GO_PKG}"
 
-    echo -ne "  ${INFO} Downloading Go ${GO_VER}..."
-    wget -q "$GO_URL" -O "/tmp/$GO_PKG"
-    echo -e " ${GREEN}done${RESET}"
+    echo -e "  ${INFO} Downloading Go ${GO_VER} (~67MB)..."
+    wget --progress=bar:force "$GO_URL" -O "/tmp/$GO_PKG" 2>&1
 
     echo -ne "  ${INFO} Installing Go..."
     $SUDO rm -rf /usr/local/go
@@ -203,13 +262,13 @@ export PATH="$PATH:$HOME/go/bin:/usr/local/go/bin"
 
 # ── 6. Go-Based Security Tools ───────────────────────────────
 step "Installing Go Security Tools"
-install_go_tool "subfinder"  "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
-install_go_tool "httpx"      "github.com/projectdiscovery/httpx/cmd/httpx@latest"
-install_go_tool "nuclei"     "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
-install_go_tool "dnsx"       "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
-install_go_tool "ffuf"       "github.com/ffuf/ffuf/v2@latest"
-install_go_tool "assetfinder" "github.com/tomnomnom/assetfinder@latest"
-install_go_tool "gowitness"  "github.com/sensepost/gowitness@latest"
+install_go_tool "subfinder"   "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"   "Subfinder (subdomain discovery)"
+install_go_tool "httpx"       "github.com/projectdiscovery/httpx/cmd/httpx@latest"               "httpx (alive check + tech detect)"
+install_go_tool "nuclei"      "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"          "Nuclei (vulnerability scanner)"
+install_go_tool "dnsx"        "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"                 "dnsx (DNS bruteforce)"
+install_go_tool "ffuf"        "github.com/ffuf/ffuf/v2@latest"                                   "ffuf (web fuzzer)"
+install_go_tool "assetfinder" "github.com/tomnomnom/assetfinder@latest"                          "Assetfinder (passive recon)"
+install_go_tool "gowitness"   "github.com/sensepost/gowitness@latest"                            "Gowitness (screenshots)"
 
 # ── 7. Nuclei Templates ──────────────────────────────────────
 step "Nuclei Templates"
